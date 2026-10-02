@@ -142,8 +142,15 @@ state_save() {
 pending_file() { printf '%s/txn/pending-%s' "$APTLY_ROOT" "$1"; }
 
 # snapshot_exists SNAPSHOT. Not `aptly snapshot show`: it fails once the
-# snapshot's source repository has been rebuilt (rebuild_repo).
-snapshot_exists() { aptly_ snapshot list -raw | grep -qxF -- "$1"; }
+# snapshot's source repository has been rebuilt (rebuild_repo). The list is
+# read in full before searching: piped into `grep -q`, which exits at the
+# first match, aptly (one write per line) can die of SIGPIPE, and pipefail
+# then reports an existing snapshot as missing.
+snapshot_exists() {
+	local list
+	list=$(aptly_ snapshot list -raw) || die "cannot list aptly snapshots"
+	grep -qxF -- "$1" <<<"$list"
+}
 
 # pending_snapshot CODENAME prints the recorded pending snapshot, if it
 # exists in the database.
