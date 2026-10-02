@@ -234,7 +234,20 @@ f="$tmp/gh/\${repo//\//_}.json"
 [[ -f \$f ]] || { echo "release not found" >&2; exit 1; }
 cat "\$f"
 EOF
-chmod +x "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh"
+# aptly whose snapshot list trickles out a line at a time and dies when the
+# reader has gone, as aptly does on SIGPIPE: a check that stops reading at a
+# match always closes the pipe while it is still writing.
+mkdir -p "$tmp/shim-aptly"
+real_aptly=$(command -v aptly)
+cat >"$tmp/shim-aptly/aptly" <<EOF
+#!/usr/bin/env bash
+[[ " \$* " == *" snapshot list "* ]] || exec "$real_aptly" "\$@"
+while IFS= read -r line; do
+	printf '%s\n' "\$line" 2>/dev/null || exit 141
+	sleep 0.01
+done < <("$real_aptly" "\$@")
+EOF
+chmod +x "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh" "$tmp/shim-aptly/aptly"
 mkdir -p "$tmp/gh"
 
 # --- dry run ------------------------------------------------------------------
@@ -515,5 +528,15 @@ if env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 
 fi
 check "the audit reports an unpublished release" \
 	grep -qx 'MISSING frostyard/updex v3.2.0 frostyard-updex_3.2.0_amd64.deb' "$tmp/out"
+
+# --- a snapshot check reads the whole snapshot list -------------------------------------
+
+# forky's published snapshot sorts before trixie's, so reconciling forky
+# matches early in the list.
+mkdeb "$tmp/updex-trickle" frostyard-updex 3.3.0 amd64
+must_pass "an existing snapshot is found while aptly is still listing" \
+	env PATH="$tmp/shim-aptly:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/updex-trickle" --codenames forky
+check "forky lists the publication" listed forky frostyard-updex 3.3.0
 
 echo "1..$n"
