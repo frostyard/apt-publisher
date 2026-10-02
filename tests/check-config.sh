@@ -31,14 +31,20 @@ awk -F'\t' -v known="$(tr '\n' , <<<"$codenames")" '!/^#/ && NF {
 	if (seen[$1]++) { print "producers.tsv line " NR ": duplicate producer " $1; bad = 1 }
 } END { exit bad }' "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
 
-# Every workflow that writes the bucket queues in the one writer group,
-# keeping up to 100 pending runs instead of GitHub's default of one.
+# Every workflow that can reach the writer's credentials (the apt-repository
+# environment) queues in the one writer group, keeping up to 100 pending runs
+# instead of GitHub's default of one. The writers must be among them.
+uses_env() { grep -q '^ *environment: apt-repository$' "$1"; }
 for workflow in publish import-stable rollback withdraw; do
-	f=$ROOT/.github/workflows/$workflow.yml
+	uses_env "$ROOT/.github/workflows/$workflow.yml" ||
+		fail "$workflow.yml must use the apt-repository environment"
+done
+for f in "$ROOT"/.github/workflows/*.yml; do
+	uses_env "$f" || continue
 	block=$(awk '/^concurrency:/ { c = 1; next } c && /^[^ ]/ { c = 0 } c' "$f")
 	for line in 'group: apt-repository' 'cancel-in-progress: false' 'queue: max'; do
 		grep -qx "  $line" <<<"$block" ||
-			fail "$workflow.yml concurrency must set $line (one queued writer group)"
+			fail "$(basename "$f") concurrency must set $line (one queued writer group)"
 	done
 done
 
