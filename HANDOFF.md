@@ -178,7 +178,7 @@ Re-check these if versions change:
 ```sh
 git clone git@github.com:frostyard/apt-publisher.git && cd apt-publisher
 mise install    # aptly 1.6.3, rclone, shellcheck, actionlint, jq (mise.lock)
-make verify     # 118 end-to-end checks, about 25 s
+make verify     # 120 end-to-end checks, about 25 s
 ```
 
 The test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`, `curl` and
