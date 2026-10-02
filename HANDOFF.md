@@ -22,7 +22,15 @@ learned along the way, and what's next. Delete it once it's stale.
   - [check-secrets run 37048085445](https://github.com/frostyard/apt-publisher/actions/runs/37048085445)
     confirmed every value. The Cloudflare token first lacked Cache Purge
     and was fixed.
-- **Not run against R2 yet.** That's step 3, next.
+- **The R2 trial passed** on 2026-10-02, from a workstation under
+  `debian-test/`. Steps: publish, deep verify, the canary through the CDN,
+  withdraw and rollback. A separate `purge-cache.sh trixie forky` purged
+  30 URLs in one request. The trial's files were cleaned up:
+  `/debian-test/` returns 404.
+- **The import review run passed** (step 5). The publish run is next and
+  waits on approval.
+- **Open to-do, not blocking:** Cloudflare cache rules (step 4). Nothing on
+  the repository is cached today. Do it before clients move (step 7).
 - **Nothing outside this repo has changed:**
   - updex and the other producers still call repogen's `publish-to-r2`
     action. The deb path of that action refuses to run, so their deb
@@ -124,6 +132,16 @@ Re-check these if versions change:
 - **Cloudflare purge errors.** An active token without Cache Purge on the
   zone gets "Authentication error", not a permission error. check-secrets
   reports the token's status alongside it to tell the cases apart.
+- **Against real R2** (aptly 1.6.3, the R2 trial):
+  - aptly's S3 publishing works with `region: auto` and `acl: none`, and
+    rclone's `Cloudflare` provider restores and saves the state;
+  - `verify --deep` passed, so R2 ETags are MD5s for aptly's uploads;
+  - the zone accepts a purge of 30 URLs in one request.
+- **The CDN caches nothing.**
+  - `repository.frostyard.org` serves any bucket prefix: `/debian-test/`
+    worked with no setup, so `/debian/` will too.
+  - Every response is `cf-cache-status: DYNAMIC`, the immutable `by-hash`
+    indexes included (checked 2026-10-02).
 
 ## Next steps, in order
 
@@ -136,10 +154,12 @@ Re-check these if versions change:
 2. **Infrastructure.** Done. The signing key was checked for fingerprint,
    no passphrase, and a signature that verifies with `keys/frostyard.gpg`.
    Rerun **check-secrets** after rotating any secret.
-3. **R2 trial.** From a workstation, against real R2 under
-   `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`. Set
-   `APT_PUBLIC_URL=https://repository.frostyard.org/debian-test` too, or
-   the canary and purge check `/debian`.
+3. **R2 trial.** Done, and passed (see "Against real R2" above). Repeat it
+   after upgrading aptly or rclone.
+   - Run it from a workstation, against real R2 under
+     `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`.
+   - Set `APT_PUBLIC_URL=https://repository.frostyard.org/debian-test` too,
+     or the canary and purge check `/debian`.
    - Steps:
      1. Fetch updex v2.0.1 and verify its attestations.
      2. Dry run, then publish to trixie and forky.
@@ -151,21 +171,54 @@ Re-check these if versions change:
         deletes files.
    - Import the key into a throwaway `GNUPGHOME`, and give each script a
      fresh `APTLY_ROOT`, as a runner would have.
-   - The second session wrote this as `r2-trial.sh` (with `--cleanup`) in
-     its scratchpad on the workstation; it isn't committed. It was
-     rehearsed end to end against `rclone serve s3`, with the real updex
-     release and a throwaway key.
-   - This confirms aptly with `region: auto` and `acl: none`, rclone's
-     Cloudflare provider, R2 ETags as MD5s for aptly's uploads, and that the
-     token can write (check-secrets only lists).
-4. **Cloudflare.**
-   - Confirm `https://repository.frostyard.org/debian/` serves from the
-     bucket, and decide cache rules for `dists/`. The legacy `InRelease`
-     currently comes back `cf-cache-status: DYNAMIC`: nothing is cached
-     today.
-   - The purge sends 30 URLs per request; check the zone's limits.
+   - The second session wrote this as `r2-trial.sh`, with a `--cleanup`
+     mode. It lives in that session's scratchpad under `/tmp` on the
+     workstation, isn't committed, and is gone after a reboot.
+   - `r2-trial.sh --cleanup` removes `debian-test/` and `aptly-test/`.
+4. **Cloudflare cache rules (to-do; do before step 7).** Serving and purge
+   are confirmed. What remains is caching: today every request goes to R2.
+   - [ ] Add a Cache Rule on the `frostyard.org` zone: Caching →
+     Cache Rules → Create rule.
+     - Name: `apt immutable`.
+     - Custom filter expression:
+       `starts_with(http.request.uri.path, "/debian/pool/") or (starts_with(http.request.uri.path, "/debian/dists/") and http.request.uri.path contains "/by-hash/")`.
+     - Cache eligibility: Eligible for cache.
+     - Edge TTL: ignore cache-control header, 1 year.
+     - Browser TTL: 1 year.
+   - Why that's safe: pool files never change under the same name (the
+     publisher refuses different bytes for an existing version), and
+     `by-hash` paths are content-addressed.
+   - [ ] Leave the mutable indexes uncached: `InRelease`, `Release`,
+     `Release.gpg` and `main/binary-*/Packages*`. If a rule ever caches
+     them, `purge-cache.sh` purges exactly those after each publish.
+   - [ ] Check it: request a `by-hash` URL twice and expect
+     `cf-cache-status: HIT` the second time, while `InRelease` stays
+     `DYNAMIC`.
 5. **Import.** Run **import-stable** without `publish` and review the
    manifest. Then run it with `publish` and that `manifest_sha256`.
+   - **Review: done.**
+     [Run 37050674184](https://github.com/frostyard/apt-publisher/actions/runs/37050674184)
+     downloaded and verified the whole suite in about 4 minutes.
+     - 234 files of 32 packages: 9 `all` and 225 `amd64`.
+     - No `~debNN` markers. The `-debian13-` in incus versions isn't one,
+       so everything belongs in trixie.
+     - No two different files share a package, version and architecture,
+       which `aptly repo add` would refuse. The review itself doesn't
+       check this; it was checked separately against the live index.
+     - `pool/main/s/snow-first-setup/snow-first-setup.deb` is
+       snow-first-setup 0.1.1 under a nonstandard name; aptly files it
+       under its proper name.
+     - Manifest SHA256:
+       `bd8fcbcfdfe86afe894dce7d500868fc80bcbe21bf6e24c3a670e00562ba6637`.
+   - **Publish: next.** Run import-stable with `publish` checked and that
+     SHA256.
+     - It verifies again, refuses if `stable` changed since the review,
+       imports into trixie only, and publishes `/debian/dists/trixie`.
+       forky stays empty until producers publish to it.
+     - Expect about 3 GiB uploaded twice: to `frostyardrepo/debian/pool`
+       and to the state bucket's pool. The job's timeout is 60 minutes.
+     - If `stable` changes before then, review again: the SHA256 will
+       differ.
 6. **Producers.**
    - Move updex first, using the snippet in the README. Producers need an
      `APT_PUBLISH_TOKEN` with Contents read/write on apt-publisher only.
@@ -175,7 +228,12 @@ Re-check these if versions change:
      `bootc`, `libostree-1-1`, `voxtype`, `ttfx`, `tensaku`, `omawrite`,
      `omacut`, `omacalc`, `moonlight-qt`, `kapsule*`,
      `hyprland-preview-share-picker`, `herdr`, `gpu-screen-recorder`,
-     `cliamp`, `aether` and `igloo`.
+     `cliamp`, `aether`, `igloo` and `snow-first-setup` (arch `all`).
+     - The import review's full list adds
+       `frostyard-chairlift-system-integration`, which `frostyard-*`
+       already covers.
+     - Both `frostyard-igloo` and `igloo` exist, which looks like a rename.
+       Register whichever name the producer ships now.
    - Producers that link distribution libraries need one build per codename
      with `~deb13` / `~deb14` versions; bootc-debian is the first of these.
    - **Private producers can't be fetched yet.** bootc-debian is private.
