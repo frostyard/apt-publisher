@@ -1,0 +1,5 @@
+# actionlint (through 1.7.12) predates the concurrency `queue` key.
+paths:
+  .github/workflows/*.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

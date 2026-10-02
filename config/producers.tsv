@@ -1,0 +1,13 @@
+# repository	packages	codenames	attested	notify
+#
+# repository  GitHub owner/name allowed to request publication.
+# packages    comma-separated shell globs; every .deb in a release must match.
+# codenames   comma-separated codenames this producer may publish to; also the
+#             default when a request names none.
+# attested    yes: every .deb must carry a GitHub build-provenance attestation
+#             from this repository's tag workflow (gh attestation verify).
+# notify      comma-separated repositories sent a `build` dispatch after a
+#             successful publish, or - for none.
+#
+# Add a producer only after confirming the package names it ships.
+frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi

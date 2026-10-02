@@ -1,0 +1,83 @@
+# Import repogen's legacy dists/stable into an aptly codename, in two runs:
+#   1. publish unchecked: download and verify everything, then show the
+#      package list and the manifest SHA256 in the run summary. No state
+#      changes.
+#   2. publish checked, with that SHA256: verify again, refuse if anything
+#      changed since the review, then import and publish.
+name: import-stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      codename:
+        description: Codename to import the legacy stable suite into
+        type: choice
+        options: [trixie]
+        default: trixie
+      publish:
+        description: Import and publish (requires manifest_sha256 from a review run)
+        type: boolean
+        default: false
+      manifest_sha256:
+        description: Manifest SHA256 shown by the review run
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: apt-repository
+    env:
+      CODENAME: ${{ inputs.codename }}
+      MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+
+      - name: Download and verify (review)
+        if: ${{ !inputs.publish }}
+        run: |
+          sha=$(scripts/import-stable.sh --codename "$CODENAME" --download-only)
+          {
+            echo "### Review: $(wc -l <"$RUNNER_TEMP/aptly/import/manifest.tsv") packages for $CODENAME"
+            echo
+            echo "To import and publish exactly this list, rerun with publish checked and manifest_sha256:"
+            echo
+            echo "\`$sha\`"
+            echo
+            echo '```'
+            cut -f4-6 "$RUNNER_TEMP/aptly/import/manifest.tsv" | sort
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Import signing key
+        if: ${{ inputs.publish }}
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: scripts/import-signing-key.sh
+
+      - name: Import and publish
+        if: ${{ inputs.publish }}
+        run: |
+          [[ -n $MANIFEST_SHA256 ]] || { echo "manifest_sha256 is required to publish" >&2; exit 1; }
+          scripts/import-stable.sh --codename "$CODENAME" --expect-manifest "$MANIFEST_SHA256"
+
+      - name: Purge CDN cache
+        if: ${{ inputs.publish }}
+        env:
+          CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: scripts/purge-cache.sh "$CODENAME"

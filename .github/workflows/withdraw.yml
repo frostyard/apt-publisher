@@ -1,0 +1,64 @@
+# Withdraw one package version from a codename, leaving everything else
+# published. The file stays in the pool; republishing the release restores it.
+name: withdraw
+
+on:
+  workflow_dispatch:
+    inputs:
+      codename:
+        description: Codename to withdraw from
+        type: choice
+        options: [trixie, forky]
+      package:
+        description: Package name
+        required: true
+      version:
+        description: Exact version
+        required: true
+      arch:
+        description: Only this architecture (empty withdraws every architecture)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  withdraw:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: apt-repository
+    env:
+      CODENAME: ${{ inputs.codename }}
+      PACKAGE: ${{ inputs.package }}
+      VERSION: ${{ inputs.version }}
+      ARCH: ${{ inputs.arch }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: scripts/import-signing-key.sh
+
+      - name: Withdraw
+        run: |
+          args=(--codename "$CODENAME" --package "$PACKAGE" --version "$VERSION")
+          if [[ -n $ARCH ]]; then args+=(--arch "$ARCH"); fi
+          scripts/withdraw.sh "${args[@]}"
+
+      - name: Purge CDN cache
+        env:
+          CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: scripts/purge-cache.sh "$CODENAME"

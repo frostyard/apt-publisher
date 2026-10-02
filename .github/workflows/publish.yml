@@ -1,0 +1,113 @@
+# Publish a producer's GitHub release to the Frostyard APT repository.
+#
+# Producers send a repository_dispatch:
+#   event-type: publish-deb
+#   client-payload: {"repo": "frostyard/updex", "tag": "v2.0.2",
+#                    "codenames": ["trixie", "forky"]}   # codenames optional
+name: publish
+
+on:
+  repository_dispatch:
+    types: [publish-deb]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Producer repository (owner/name)
+        required: true
+      tag:
+        description: Release tag
+        required: true
+      codenames:
+        description: Space-separated codenames (default is the producer's configured list)
+        required: false
+
+permissions:
+  contents: read
+
+# The single writer: publications queue behind each other instead of racing.
+# import-stable.yml, rollback.yml and withdraw.yml share this group.
+# queue: max keeps up to 100 pending runs; the default keeps one and cancels
+# the rest. A failed or cancelled run keeps its payload: re-run it from the
+# Actions page. audit.yml reports releases that never got published.
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: apt-repository
+    env:
+      # Request values reach scripts only through the environment.
+      PRODUCER: ${{ github.event.client_payload.repo || inputs.repo }}
+      TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+      CODENAMES: ${{ github.event.client_payload.codenames && join(github.event.client_payload.codenames, ' ') || inputs.codenames }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+
+      - name: Fetch and verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/fetch-release.sh "$PRODUCER" "$TAG" "$RUNNER_TEMP/debs"
+
+      - name: Validate routing
+        run: |
+          args=(--producer "$PRODUCER" --debs "$RUNNER_TEMP/debs")
+          if [[ -n $CODENAMES ]]; then args+=(--codenames "$CODENAMES"); fi
+          scripts/publish.sh "${args[@]}" --dry-run
+
+      - name: Import signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: scripts/import-signing-key.sh
+
+      - name: Publish
+        id: publish
+        run: |
+          args=(--producer "$PRODUCER" --debs "$RUNNER_TEMP/debs" --label "${PRODUCER#*/}-$TAG"
+            --report "$RUNNER_TEMP/report.tsv")
+          if [[ -n $CODENAMES ]]; then args+=(--codenames "$CODENAMES"); fi
+          scripts/publish.sh "${args[@]}" | tee "$RUNNER_TEMP/published.txt"
+          echo "codenames=$(cut -d' ' -f1 "$RUNNER_TEMP/published.txt" | xargs)" >>"$GITHUB_OUTPUT"
+          {
+            echo "### Published ${PRODUCER} ${TAG}"
+            echo
+            echo '| Codename | Snapshot |'
+            echo '| --- | --- |'
+            # shellcheck disable=SC2016 # literal Markdown backticks
+            sed 's/^\([^ ]*\) \(.*\)$/| \1 | `\2` |/' "$RUNNER_TEMP/published.txt"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Purge CDN cache
+        env:
+          CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PUBLISHED: ${{ steps.publish.outputs.codenames }}
+        run: |
+          # shellcheck disable=SC2086 # one argument per codename
+          scripts/purge-cache.sh $PUBLISHED
+
+      - name: Install canary through the public endpoint
+        run: |
+          # Allow the CDN a moment after the purge before failing.
+          for attempt in 1 2 3; do
+            if scripts/apt-canary.sh --report "$RUNNER_TEMP/report.tsv"; then
+              exit 0
+            fi
+            echo "canary attempt $attempt failed; retrying" >&2
+            sleep 30
+          done
+          exit 1
+
+      - name: Notify downstream
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: scripts/notify.sh "$PRODUCER"

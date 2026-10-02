@@ -1,0 +1,7 @@
+# Tool pins for the publisher and its gates (core ADR-0043).
+[tools]
+"github:aptly-dev/aptly" = "1.6.3"
+"github:rclone/rclone" = "1.71.1"
+shellcheck = "0.11.0"
+actionlint = "1.7.7"
+jq = "1.8.1"

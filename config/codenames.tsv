@@ -1,0 +1,5 @@
+# codename	debian-major	architectures
+# A package version carrying a ~debNN or +debNN marker may only be published
+# to the codename whose debian-major is NN. Unmarked versions may go anywhere.
+trixie	13	amd64,arm64,all
+forky	14	amd64,arm64,all
