@@ -1,20 +1,28 @@
 # Handoff: apt-publisher
 
 Written 2026-10-02 at the end of a Claude Code session, to resume on another
-machine. The [README](README.md) explains how the publisher works, and
+machine, and updated the same day after a second session finished the
+infrastructure (step 2). The [README](README.md) explains how the publisher works, and
 [ADR-0001](docs/adr/0001-aptly-single-writer.md) records why. This file holds
 what those don't: where things stand, what was verified and how, what was
 learned along the way, and what's next. Delete it once it's stale.
 
 ## Where things stand
 
-- **Repo:** `github.com/frostyard/apt-publisher`, **private**. One code
-  commit (`38ee348`) plus this file.
-- **CI:** [run 37040199794](https://github.com/frostyard/apt-publisher/actions/runs/37040199794)
-  passed on GitHub: config checks, then all 113 end-to-end checks.
-- **Not run against R2 yet.** The `apt-repository` environment exists
-  (limited to `main`) with all seven secrets, set 2026-10-02. Run
-  **check-secrets** to confirm their values before the R2 trial.
+- **Repo:** `github.com/frostyard/apt-publisher`, **private**. `main` holds
+  the publisher (`38ee348`), this file, the **check-secrets** workflow
+  (frostyard/apt-publisher#1) and a fix for `snapshot_exists`
+  (frostyard/apt-publisher#2).
+- **CI:** [run 37047292325](https://github.com/frostyard/apt-publisher/actions/runs/37047292325)
+  passed on `main`: config checks, then all 120 end-to-end checks.
+- **Infrastructure is in place.**
+  - The `frostyard-apt-state` bucket and an R2 token exist.
+  - The `apt-repository` environment is limited to `main` and holds all
+    seven secrets.
+  - [check-secrets run 37048085445](https://github.com/frostyard/apt-publisher/actions/runs/37048085445)
+    confirmed every value. The Cloudflare token first lacked Cache Purge
+    and was fixed.
+- **Not run against R2 yet.** That's step 3, next.
 - **Nothing outside this repo has changed:**
   - updex and the other producers still call repogen's `publish-to-r2`
     action. The deb path of that action refuses to run, so their deb
@@ -84,6 +92,15 @@ Re-check these if versions change:
 - **aptly snapshot behaviour.**
   - `aptly snapshot show` exits 1 once the snapshot's source repo has been
     dropped. Use `snapshot_exists`, which is `snapshot list -raw`.
+  - aptly writes `snapshot list` one line per `write` call.
+    - Piped into `grep -q` under `pipefail`, aptly could die of SIGPIPE, so
+      an existing snapshot was reported missing: 107 of 300 calls with
+      both processes on one CPU.
+    - It surfaced as an intermittent CI failure, "no snapshot named
+      forky-…".
+    - `snapshot_exists` now reads the whole list first
+      (frostyard/apt-publisher#2). Do the same with any reader of aptly
+      output that stops early.
   - `aptly repo drop -force` keeps snapshots.
   - `repo create NAME from snapshot S` rebuilds a repo from a snapshot.
 - **Index field order.** aptly's `Packages` stanzas don't put `Architecture`
@@ -100,31 +117,52 @@ Re-check these if versions change:
   hence the ignore in `.github/actionlint.yaml`.
 - **`apt-get download` over `file://`** verifies hashes, which is why the
   canary corruption test is meaningful.
+- **`gh attestation verify`** prints nothing when stdout isn't a terminal;
+  only the exit status matters.
+  - On updex v2.0.1, the genuine `.deb` gives 0, while a tampered copy or
+    the wrong `--source-ref` tag gives 1.
+- **Cloudflare purge errors.** An active token without Cache Purge on the
+  zone gets "Authentication error", not a permission error. check-secrets
+  reports the token's status alongside it to tell the cases apart.
 
 ## Next steps, in order
 
-1. **Visibility.** The org's repos are mostly public (58 of 64, repogen
-   included). Environment branch protection may need a public repo on a
-   free plan:
+1. **Visibility (optional).** The org is on the Team plan, which allows
+   environment branch rules on private repos; the environment works as is.
+   Only required reviewers or wait timers would need a public repo (or
+   Enterprise). The org's repos are mostly public (58 of 64, repogen
+   included), so going public is a preference:
    `gh repo edit frostyard/apt-publisher --visibility public --accept-visibility-change-consequences`.
-2. **Infrastructure.**
-   - Create a private R2 bucket, `frostyard-apt-state`.
-   - Create an R2 token with read/write on it and on `frostyardrepo`.
-   - Create a GitHub environment, `apt-repository`, limited to `main`,
-     with secrets `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
-     `R2_SECRET_ACCESS_KEY`, `APT_SIGNING_KEY`, `CLOUDFLARE_ZONE`,
-     `CLOUDFLARE_API_TOKEN` and `DISPATCH_TOKEN`.
-   - Confirm `REPOGEN_GPG_KEY` has no passphrase; the scripts assume none.
-3. **R2 trial.**
-   - Run publish, rollback, withdraw and verify from a workstation against
-     R2, with `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`.
-   - Set the `R2_*` and `APT_SIGNING_KEY` env vars, and import the key with
-     `scripts/import-signing-key.sh`.
+2. **Infrastructure.** Done. The signing key was checked for fingerprint,
+   no passphrase, and a signature that verifies with `keys/frostyard.gpg`.
+   Rerun **check-secrets** after rotating any secret.
+3. **R2 trial.** From a workstation, against real R2 under
+   `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`. Set
+   `APT_PUBLIC_URL=https://repository.frostyard.org/debian-test` too, or
+   the canary and purge check `/debian`.
+   - Steps:
+     1. Fetch updex v2.0.1 and verify its attestations.
+     2. Dry run, then publish to trixie and forky.
+     3. `verify.sh --deep` both codenames, purge, then run the canary
+        through the CDN.
+     4. Withdraw the arm64 build from forky (the `publish switch` path).
+     5. `switch.sh` back to the first forky snapshot.
+     6. Clean up both test prefixes by hand: nothing in the publisher
+        deletes files.
+   - Import the key into a throwaway `GNUPGHOME`, and give each script a
+     fresh `APTLY_ROOT`, as a runner would have.
+   - The second session wrote this as `r2-trial.sh` (with `--cleanup`) in
+     its scratchpad on the workstation; it isn't committed. It was
+     rehearsed end to end against `rclone serve s3`, with the real updex
+     release and a throwaway key.
    - This confirms aptly with `region: auto` and `acl: none`, rclone's
-     Cloudflare provider, and that R2 ETags are MD5s for aptly's uploads.
+     Cloudflare provider, R2 ETags as MD5s for aptly's uploads, and that the
+     token can write (check-secrets only lists).
 4. **Cloudflare.**
    - Confirm `https://repository.frostyard.org/debian/` serves from the
-     bucket, and decide cache rules for `dists/`.
+     bucket, and decide cache rules for `dists/`. The legacy `InRelease`
+     currently comes back `cf-cache-status: DYNAMIC`: nothing is cached
+     today.
    - The purge sends 30 URLs per request; check the zone's limits.
 5. **Import.** Run **import-stable** without `publish` and review the
    manifest. Then run it with `publish` and that `manifest_sha256`.
@@ -140,6 +178,10 @@ Re-check these if versions change:
      `cliamp`, `aether` and `igloo`.
    - Producers that link distribution libraries need one build per codename
      with `~deb13` / `~deb14` versions; bootc-debian is the first of these.
+   - **Private producers can't be fetched yet.** bootc-debian is private.
+     `fetch-release.sh` (in publish) and the audit use `github.token`,
+     which can't read another private repo's releases. Give them a token
+     with Contents read on private producers, or make those repos public.
    - Producers without build attestations use `attested=no` until they add
      `actions/attest-build-provenance`.
 7. **snosi.** Change `frostyard.sources` to
