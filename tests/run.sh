@@ -539,4 +539,42 @@ must_pass "an existing snapshot is found while aptly is still listing" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/updex-trickle" --codenames forky
 check "forky lists the publication" listed forky frostyard-updex 3.3.0
 
+# --- secrets check ------------------------------------------------------------
+
+# Cloudflare's API accepts token testcftoken and only zone testzone; gh
+# accepts token testdispatch and logs each call to $tmp/dispatches.
+mkdir -p "$tmp/shim-check"
+cat >"$tmp/shim-check/curl" <<'EOF'
+#!/usr/bin/env bash
+[[ $* == *'Bearer testcftoken'* ]] || {
+	echo '{"success": false, "errors": [{"message": "Authentication error"}]}'
+	exit 0
+}
+case $* in
+*/zones/testzone/purge_cache*) echo '{"success": true}' ;;
+*/purge_cache*) echo '{"success": false, "errors": [{"message": "Could not route to zone"}]}' ;;
+*/user/tokens/verify*) echo '{"success": true, "result": {"status": "active"}}' ;;
+*) exit 2 ;;
+esac
+EOF
+cat >"$tmp/shim-check/gh" <<EOF
+#!/usr/bin/env bash
+[[ \$GH_TOKEN == testdispatch ]] || { echo 'HTTP 401: Bad credentials' >&2; exit 1; }
+echo "\$*" >>"$tmp/dispatches"
+EOF
+chmod +x "$tmp/shim-check/curl" "$tmp/shim-check/gh"
+secrets=(PATH="$tmp/shim-check:$PATH" APT_SIGNING_KEY="$(gpg --armor --export-secret-keys "${fprs[0]}")"
+	CLOUDFLARE_ZONE=testzone CLOUDFLARE_API_TOKEN=testcftoken GH_TOKEN=testdispatch)
+must_pass "the secrets check passes with working secrets" env "${secrets[@]}" "$ROOT/scripts/check-secrets.sh"
+check "the secrets check covers the key, both buckets, the zone and snosi" test "$(grep -c '^ok - ' "$tmp/out")" = 5
+check "the dispatch check sends no build event" \
+	grep -qx 'api --method POST repos/frostyard/snosi/dispatches -f event_type=apt-publisher-token-check' "$tmp/dispatches"
+if env "${secrets[@]}" APT_SIGNING_KEY_FPR=0000000000000000000000000000000000000000 \
+	APT_STATE_BUCKET=missing-bucket CLOUDFLARE_ZONE=otherzone \
+	"$ROOT/scripts/check-secrets.sh" >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the secrets check reports every failing secret (unexpectedly passed)"
+fi
+check "the secrets check reports every failing secret" test "$(grep -c '^FAIL - ' "$tmp/out")" = 3
+check "a failing secret does not stop the other checks" grep -qx 'ok - DISPATCH_TOKEN can dispatch to frostyard/snosi' "$tmp/out"
+
 echo "1..$n"

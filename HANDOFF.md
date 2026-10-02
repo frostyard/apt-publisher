@@ -12,8 +12,9 @@ learned along the way, and what's next. Delete it once it's stale.
   commit (`38ee348`) plus this file.
 - **CI:** [run 37040199794](https://github.com/frostyard/apt-publisher/actions/runs/37040199794)
   passed on GitHub: config checks, then all 113 end-to-end checks.
-- **Not run against R2 yet.** No infrastructure exists: no state bucket, no
-  `apt-repository` environment, no secrets.
+- **Not run against R2 yet.** The `apt-repository` environment exists
+  (limited to `main`) with all seven secrets, set 2026-10-02. Run
+  **check-secrets** to confirm their values before the R2 trial.
 - **Nothing outside this repo has changed:**
   - updex and the other producers still call repogen's `publish-to-r2`
     action. The deb path of that action refuses to run, so their deb
@@ -177,7 +178,7 @@ Re-check these if versions change:
 ```sh
 git clone git@github.com:frostyard/apt-publisher.git && cd apt-publisher
 mise install    # aptly 1.6.3, rclone, shellcheck, actionlint, jq (mise.lock)
-make verify     # 113 end-to-end checks, about 25 s
+make verify     # 120 end-to-end checks, about 25 s
 ```
 
 The test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`, `curl` and

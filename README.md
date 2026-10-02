@@ -169,6 +169,15 @@ keyrings keep working.
      repogen's `REPOGEN_GPG_KEY`. It must not have a passphrase;
    - `CLOUDFLARE_ZONE`, `CLOUDFLARE_API_TOKEN` (cache purge);
    - `DISPATCH_TOKEN` (repository_dispatch to the `notify` repositories).
+4. Run **check-secrets**. It checks every secret without publishing:
+   - the signing key's fingerprint, that it signs without a passphrase, and
+     that `keys/frostyard.gpg` verifies the signature;
+   - that R2 can list both buckets (read-only, so write access is first
+     proven by a publication);
+   - that Cloudflare purges one `dists/` URL from the zone;
+   - that `DISPATCH_TOKEN` can dispatch to each `notify` repository. It sends
+     event type `apt-publisher-token-check`, which starts nothing as long as
+     those repositories' `repository_dispatch` triggers filter on `types`.
 
 ## Migrating from repogen
 
@@ -224,6 +233,7 @@ keyrings keep working.
   `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`.
 - **Missed releases:** `scripts/audit-producers.sh`, run nightly by
   **audit**.
+- **Secrets:** run **check-secrets** after setting or rotating one.
 - **Routing check** without credentials:
   `scripts/publish.sh --producer frostyard/updex --debs ./dist --dry-run`.
 
@@ -247,7 +257,8 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
 - simulates the failures it guards against: a stale database, an
   interrupted publication (an `rclone` shim that fails a save), leftover
   import files, corrupted pool files and tampered indexes;
-- runs the audit against a stubbed `gh`.
+- runs the audit against a stubbed `gh`, and the secrets check against
+  stubbed `curl` and `gh`.
 
 `KEEP_TMP=1` keeps its work directory for inspection.
 
@@ -261,7 +272,8 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
   purged after each publish.
 - **actionlint:** actionlint (1.7.12 included) doesn't know the
   concurrency `queue` key yet, so `.github/actionlint.yaml` ignores that one
-  error. `tests/check-config.sh` asserts every writer workflow sets it.
+  error. `tests/check-config.sh` asserts every workflow using the
+  `apt-repository` environment sets it.
 - **Restore cost:** each run restores the whole state pool, about 3 GiB
   after the import. aptly reads a pool file only when a snapshot references
   a package the bucket lacks, so a database-only restore with on-demand pool
