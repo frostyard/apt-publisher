@@ -1,41 +1,78 @@
 # Handoff: apt-publisher
 
 Written 2026-10-02 at the end of a Claude Code session, to resume on another
-machine, and updated the same day after a second session finished the
-infrastructure (step 2). The [README](README.md) explains how the publisher works, and
-[ADR-0001](docs/adr/0001-aptly-single-writer.md) records why. This file holds
-what those don't: where things stand, what was verified and how, what was
-learned along the way, and what's next. Delete it once it's stale.
+machine, and updated by a second session the same day.
+
+**The order and status of the remaining work now live in core:**
+[Plan 0009](https://github.com/frostyard/core/blob/main/docs/plans/0009-debian-publication-through-apt-publisher.md).
+It is governed by core
+[ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md)
+(apt-publisher is the single Debian writer) and
+[ADR-0056](https://github.com/frostyard/core/blob/main/docs/adr/0056-rebuild-images-after-apt-publication.md)
+(apt-publisher triggers image rebuilds).
+
+The [README](README.md) explains how the publisher works, and
+[ADR-0001](docs/adr/0001-aptly-single-writer.md) records this repository's
+side of the decision. This file holds what none of those do: apt-publisher
+specifics, what was verified and how, and what was learned along the way.
+Delete it once it's stale.
 
 ## Where things stand
 
-- **Repo:** `github.com/frostyard/apt-publisher`, **private**. `main` holds
-  the publisher (`38ee348`), this file, the **check-secrets** workflow
-  (frostyard/apt-publisher#1) and a fix for `snapshot_exists`
-  (frostyard/apt-publisher#2).
-- **CI:** [run 37047292325](https://github.com/frostyard/apt-publisher/actions/runs/37047292325)
+- **Governance.** Core ADR-0055 and ADR-0056 were Accepted on 2026-10-02
+  (frostyard/core#149, frostyard/core#150).
+  - They supersede core ADR-0048, ADR-0054 and ADR-0013, and ADR-0009's
+    Debian namespace.
+  - Plan 0009 is Active and replaces Plans 0006 and 0007.
+  - frostyard/core#151 updates the shared `frostyard-go-repo` skill's
+    release step to match.
+- **Repo:** `github.com/frostyard/apt-publisher`, **private**.
+  - The "Protect main" ruleset requires a pull request (0 approvals) and
+    blocks force-pushes and deletion on `main`, with no bypass.
+  - It exists because `APT_PUBLISH_TOKEN` needs Contents: write here, which
+    would otherwise let a leaked token push a workflow to `main`, where the
+    secrets live.
+- **CI:** [run 37051549653](https://github.com/frostyard/apt-publisher/actions/runs/37051549653)
   passed on `main`: config checks, then all 120 end-to-end checks.
 - **Infrastructure is in place.**
   - The `frostyard-apt-state` bucket and an R2 token exist.
   - The `apt-repository` environment is limited to `main` and holds all
     seven secrets.
   - [check-secrets run 37048085445](https://github.com/frostyard/apt-publisher/actions/runs/37048085445)
-    confirmed every value. The Cloudflare token first lacked Cache Purge
-    and was fixed.
-- **The R2 trial passed** on 2026-10-02, from a workstation under
-  `debian-test/`. Steps: publish, deep verify, the canary through the CDN,
-  withdraw and rollback. A separate `purge-cache.sh trixie forky` purged
-  30 URLs in one request. The trial's files were cleaned up:
-  `/debian-test/` returns 404.
-- **The import review run passed** (step 5). The publish run is next and
-  waits on approval.
-- **Open to-do, not blocking:** Cloudflare cache rules (step 4). Nothing on
-  the repository is cached today. Do it before clients move (step 7).
-- **Nothing outside this repo has changed:**
-  - updex and the other producers still call repogen's `publish-to-r2`
-    action. The deb path of that action refuses to run, so their deb
-    publishing is effectively blocked today.
-  - snosi still reads the legacy `stable` suite.
+    confirmed every value.
+  - The R2 trial passed under `debian-test/`, which was then removed.
+- **`trixie` is live** at `https://repository.frostyard.org/debian/`.
+  - It was seeded from the full signed `stable` suite on 2026-10-02:
+    [run 37051548490](https://github.com/frostyard/apt-publisher/actions/runs/37051548490),
+    snapshot `trixie-20261002T190620Z-import-stable`, 234 files of 32
+    packages.
+  - Checked independently afterwards: the signature verifies with
+    `keys/frostyard.gpg`, the index contents match, and apt downloads
+    packages through the public URL.
+  - Legacy `stable` is unchanged.
+- **updex is the first migrated producer.**
+  - Its release requests publication with `publish-deb`
+    (frostyard/updex#432).
+  - The org secret `APT_PUBLISH_TOKEN` is shared with updex only.
+  - **v2.0.2 went through the whole path on 2026-10-02.**
+    - The release ran
+      [goreleaser run 37058579495](https://github.com/frostyard/updex/actions/runs/37058579495),
+      which dispatched `publish-deb`.
+    - [Publish run 37058743496](https://github.com/frostyard/apt-publisher/actions/runs/37058743496)
+      took 4m40s. It verified the attestations, switched `trixie` to
+      `trixie-20261002T201001Z-updex-v2.0.2`, and published `forky` for
+      the first time from `forky-20261002T201002Z-updex-v2.0.2`.
+    - It then read both suites back, purged 30 URLs, and ran the canary
+      on trixie and forky for amd64 and arm64.
+    - Finally it dispatched `build` to snosi, whose Build Image Variants
+      and Build Installer ISO started at 20:13:57.
+  - **Those snosi builds still install updex 2.0.1.** snosi reads the
+    frozen `stable` suite until Plan 0009 Phase 5 moves it to `/debian/`
+    `trixie`, so the rebuild fan-out has no effect on images until then.
+- **Not yet moved:**
+  - every other producer (Plan 0009 Phase 4);
+  - snosi, which still reads `stable` (Phase 5);
+  - the CDN cache rules (Phase 3).
 
 ## Why this exists
 
@@ -143,116 +180,96 @@ Re-check these if versions change:
   - Every response is `cf-cache-status: DYNAMIC`, the immutable `by-hash`
     indexes included (checked 2026-10-02).
 
-## Next steps, in order
+## Next steps: Plan 0009
 
-1. **Visibility (optional).** The org is on the Team plan, which allows
-   environment branch rules on private repos; the environment works as is.
-   Only required reviewers or wait timers would need a public repo (or
-   Enterprise). The org's repos are mostly public (58 of 64, repogen
-   included), so going public is a preference:
-   `gh repo edit frostyard/apt-publisher --visibility public --accept-visibility-change-consequences`.
-2. **Infrastructure.** Done. The signing key was checked for fingerprint,
-   no passphrase, and a signature that verifies with `keys/frostyard.gpg`.
-   Rerun **check-secrets** after rotating any secret.
-3. **R2 trial.** Done, and passed (see "Against real R2" above). Repeat it
-   after upgrading aptly or rclone.
-   - Run it from a workstation, against real R2 under
-     `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`.
-   - Set `APT_PUBLIC_URL=https://repository.frostyard.org/debian-test` too,
-     or the canary and purge check `/debian`.
-   - Steps:
-     1. Fetch updex v2.0.1 and verify its attestations.
-     2. Dry run, then publish to trixie and forky.
-     3. `verify.sh --deep` both codenames, purge, then run the canary
-        through the CDN.
-     4. Withdraw the arm64 build from forky (the `publish switch` path).
-     5. `switch.sh` back to the first forky snapshot.
-     6. Clean up both test prefixes by hand: nothing in the publisher
-        deletes files.
-   - Import the key into a throwaway `GNUPGHOME`, and give each script a
-     fresh `APTLY_ROOT`, as a runner would have.
-   - The second session wrote this as `r2-trial.sh`, with a `--cleanup`
-     mode. It lives in that session's scratchpad under `/tmp` on the
-     workstation, isn't committed, and is gone after a reboot.
-   - `r2-trial.sh --cleanup` removes `debian-test/` and `aptly-test/`.
-4. **Cloudflare cache rules (to-do; do before step 7).** Serving and purge
-   are confirmed. What remains is caching: today every request goes to R2.
-   - [ ] Add a Cache Rule on the `frostyard.org` zone: Caching →
-     Cache Rules → Create rule.
-     - Name: `apt immutable`.
-     - Custom filter expression:
-       `starts_with(http.request.uri.path, "/debian/pool/") or (starts_with(http.request.uri.path, "/debian/dists/") and http.request.uri.path contains "/by-hash/")`.
-     - Cache eligibility: Eligible for cache.
-     - Edge TTL: ignore cache-control header, 1 year.
-     - Browser TTL: 1 year.
-   - Why that's safe: pool files never change under the same name (the
-     publisher refuses different bytes for an existing version), and
-     `by-hash` paths are content-addressed.
-   - [ ] Leave the mutable indexes uncached: `InRelease`, `Release`,
-     `Release.gpg` and `main/binary-*/Packages*`. If a rule ever caches
-     them, `purge-cache.sh` purges exactly those after each publish.
-   - [ ] Check it: request a `by-hash` URL twice and expect
-     `cf-cache-status: HIT` the second time, while `InRelease` stays
-     `DYNAMIC`.
-5. **Import.** Run **import-stable** without `publish` and review the
-   manifest. Then run it with `publish` and that `manifest_sha256`.
-   - **Review: done.**
-     [Run 37050674184](https://github.com/frostyard/apt-publisher/actions/runs/37050674184)
-     downloaded and verified the whole suite in about 4 minutes.
-     - 234 files of 32 packages: 9 `all` and 225 `amd64`.
-     - No `~debNN` markers. The `-debian13-` in incus versions isn't one,
-       so everything belongs in trixie.
-     - No two different files share a package, version and architecture,
-       which `aptly repo add` would refuse. The review itself doesn't
-       check this; it was checked separately against the live index.
-     - `pool/main/s/snow-first-setup/snow-first-setup.deb` is
-       snow-first-setup 0.1.1 under a nonstandard name; aptly files it
-       under its proper name.
-     - Manifest SHA256:
-       `bd8fcbcfdfe86afe894dce7d500868fc80bcbe21bf6e24c3a670e00562ba6637`.
-   - **Publish: next.** Run import-stable with `publish` checked and that
-     SHA256.
-     - It verifies again, refuses if `stable` changed since the review,
-       imports into trixie only, and publishes `/debian/dists/trixie`.
-       forky stays empty until producers publish to it.
-     - Expect about 3 GiB uploaded twice: to `frostyardrepo/debian/pool`
-       and to the state bucket's pool. The job's timeout is 60 minutes.
-     - If `stable` changes before then, review again: the SHA256 will
-       differ.
-6. **Producers.**
-   - Move updex first, using the snippet in the README. Producers need an
-     `APT_PUBLISH_TOKEN` with Contents read/write on apt-publisher only.
-   - Then register each other producer in `config/producers.tsv`. Confirm
-     each one's package names first; only updex is registered.
-   - Package names seen in `stable` include `frostyard-*`, `incus*`,
-     `bootc`, `libostree-1-1`, `voxtype`, `ttfx`, `tensaku`, `omawrite`,
-     `omacut`, `omacalc`, `moonlight-qt`, `kapsule*`,
-     `hyprland-preview-share-picker`, `herdr`, `gpu-screen-recorder`,
-     `cliamp`, `aether`, `igloo` and `snow-first-setup` (arch `all`).
-     - The import review's full list adds
-       `frostyard-chairlift-system-integration`, which `frostyard-*`
-       already covers.
-     - Both `frostyard-igloo` and `igloo` exist, which looks like a rename.
-       Register whichever name the producer ships now.
-   - Producers that link distribution libraries need one build per codename
-     with `~deb13` / `~deb14` versions; bootc-debian is the first of these.
-   - **Private producers can't be fetched yet.** bootc-debian is private.
-     `fetch-release.sh` (in publish) and the audit use `github.token`,
-     which can't read another private repo's releases. Give them a token
-     with Contents read on private producers, or make those repos public.
-   - Producers without build attestations use `attested=no` until they add
-     `actions/attest-build-provenance`.
-7. **snosi.** Change `frostyard.sources` to
-   `URIs: https://repository.frostyard.org/debian/` and `Suites: trixie`,
-   keeping the same keyring.
-8. **Audit.** Set the repository variable `APT_AUDIT_ENABLED=true` once
-   `/debian` is live.
-9. **Decisions still open:**
-   - whether ADR-0001 lives here or in `frostyard/core` next to ADR-0048;
-   - what repogen becomes: sysexts only, or replaced by a small
-     sign-and-upload script. Its v0.5.0 digest-reconciliation failure is
-     why snosi pins `repogen-version: v0.4.1`;
-   - when, or whether, to delete the frozen legacy `stable` suite.
+Plan 0009 has the phases, the producer checklist (ordered by what snosi
+installs) and the done-when conditions. Below are the apt-publisher details
+it doesn't carry.
+
+- **Phase 3, cache rules.** Not done yet; do it before snosi moves (Phase 5).
+  - [ ] Add a Cache Rule on the `frostyard.org` zone: Caching →
+    Cache Rules → Create rule.
+    - Name: `apt immutable`.
+    - Custom filter expression:
+      `starts_with(http.request.uri.path, "/debian/pool/") or (starts_with(http.request.uri.path, "/debian/dists/") and http.request.uri.path contains "/by-hash/")`.
+    - Cache eligibility: Eligible for cache.
+    - Edge TTL: ignore cache-control header, 1 year.
+    - Browser TTL: 1 year.
+  - [ ] Leave the mutable indexes uncached: `InRelease`, `Release`,
+    `Release.gpg` and `main/binary-*/Packages*`. If a rule ever caches
+    them, `purge-cache.sh` purges exactly those after each publish.
+  - [ ] Check it: request a `by-hash` URL twice and expect
+    `cf-cache-status: HIT` the second time, while `InRelease` stays
+    `DYNAMIC`.
+  - Why that's safe: pool files never change under the same name (the
+    publisher refuses different bytes for an existing version), and
+    `by-hash` paths are content-addressed.
+- **Phase 4, moving a producer.** The apt-publisher side has three steps:
+  1. **Register it.** Add a line to `config/producers.tsv` by PR, since
+     `main` is protected. `tests/check-config.sh` validates the file.
+     Confirm the package names first.
+  2. **Share the token.** Add the repo to the org secret
+     `APT_PUBLISH_TOKEN` without disturbing the existing list:
+     `gh api -X PUT orgs/frostyard/actions/secrets/APT_PUBLISH_TOKEN/repositories/$(gh api repos/frostyard/<repo> --jq .id)`.
+     Avoid `gh secret set --org --repos`, which *replaces* the list.
+  3. **Change the producer's release workflow.** frostyard/updex#432 is
+     the template, including its contract test and Tier 4 PR description.
+     Then remove the repo from the org secrets it no longer needs:
+     `REPOGEN_GPG_KEY`, `R2_*`, `CLOUDFLARE_*` and `ORG_PAT`. snosi still
+     uses some of them for sysexts.
+
+  Producer-specific notes:
+  - **incus versions carry `-debian13-`, which is not a `~debNN` marker.**
+    `publish.sh` would route such a version to every target codename.
+    Register incus for `trixie` only until its versions carry `~deb13` or
+    `~deb14`.
+  - **bootc-debian is private.** `fetch-release.sh` (in publish) and the
+    audit use `github.token`, which can't read another private repo's
+    releases. Give them a token with Contents read on private producers,
+    or make those repos public. Its releases are manual, and it isn't
+    attested, so register it `attested=no`.
+  - Producers without build attestations use `attested=no` until they add
+    `actions/attest-build-provenance`.
+  - Package names in `stable`: `frostyard-*`, `incus*`, `bootc`,
+    `libostree-1-1`, `voxtype`, `ttfx`, `tensaku`, `omawrite`, `omacut`,
+    `omacalc`, `moonlight-qt`, `kapsule*`, `hyprland-preview-share-picker`,
+    `herdr`, `gpu-screen-recorder`, `cliamp`, `aether`, `igloo` and
+    `snow-first-setup` (arch `all`).
+    - Both `frostyard-igloo` and `igloo` exist, from a rename.
+    - `kapsule*` has no producer: `github.com/frostyard/kapsule` doesn't
+      exist.
+- **Phase 5, snosi.** Change `mkosi.sandbox/etc/apt/sources.list.d/frostyard.sources`
+  to `URIs: https://repository.frostyard.org/debian/` and `Suites: trixie`,
+  keeping the same keyring.
+- **Phase 7, audit.** Set the repository variable `APT_AUDIT_ENABLED=true`
+  once producers publish through apt-publisher.
+- **Visibility (optional).** The org is on the Team plan, so the
+  `apt-repository` environment's branch rule works on a private repo.
+  Going public is a preference:
+  `gh repo edit frostyard/apt-publisher --visibility public --accept-visibility-change-consequences`.
+- **Re-running the R2 trial,** for example after upgrading aptly or rclone:
+  - Run it from a workstation, against real R2 under
+    `APT_PREFIX=debian-test` and `APT_STATE_PATH=aptly-test`.
+  - Set `APT_PUBLIC_URL=https://repository.frostyard.org/debian-test` too,
+    or the canary and purge check `/debian`.
+  - Steps:
+    1. Fetch a release and verify its attestations.
+    2. Dry run, then publish to trixie and forky.
+    3. `verify.sh --deep` both codenames, purge, then run the canary.
+    4. Withdraw one build from forky.
+    5. `switch.sh` back to the first forky snapshot.
+    6. Remove both test prefixes.
+  - Import the key into a throwaway `GNUPGHOME`, and give each script a
+    fresh `APTLY_ROOT`.
+  - The second session's `r2-trial.sh` lived in a `/tmp` scratchpad and
+    isn't committed.
+- **Decisions.**
+  - Where the decision record lives is resolved: core ADR-0055 is the org
+    record, and this repo's ADR-0001 is the local one.
+  - What repogen becomes, and what happens to `stable` after 2027-09-30,
+    are open questions in Plan 0009. repogen's v0.5.0
+    digest-reconciliation failure is why snosi pins
+    `repogen-version: v0.4.1`.
 
 ## Known limitations, accepted for now
 
