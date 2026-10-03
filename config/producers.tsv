@@ -16,3 +16,12 @@ frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi
 # Not attested: it releases from pushes to stable, so its provenance names
 # refs/heads/stable rather than the release tag that fetch-release.sh checks.
 frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi
+# Static Go, attested from v* tags; registering attested=yes also refuses the
+# unattested nightly `dev` prerelease, whose 1.0.0.dev version sorts above releases.
+frostyard/intuneme	frostyard-intuneme	trixie,forky	yes	frostyard/snosi
+frostyard/firn	frostyard-firn	trixie,forky	yes	frostyard/snosi
+# GTK4/libadwaita are loaded at runtime (puregotk, no Depends): trixie until a
+# forky smoke test passes.
+frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	yes	frostyard/snosi
+# Python, Architecture: all, built and tested on trixie only so far.
+frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi
