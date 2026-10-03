@@ -11,3 +11,8 @@
 #
 # Add a producer only after confirming the package names it ships.
 frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi
+# incus versions carry -debian13-, which is not a ~debNN marker, so they
+# would route to every target: trixie only until they carry ~deb13/~deb14.
+# Not attested: it releases from pushes to stable, so its provenance names
+# refs/heads/stable rather than the release tag that fetch-release.sh checks.
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi
