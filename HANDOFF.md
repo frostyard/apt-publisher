@@ -32,8 +32,8 @@ Delete it once it's stale.
   - It exists because `APT_PUBLISH_TOKEN` needs Contents: write here, which
     would otherwise let a leaked token push a workflow to `main`, where the
     secrets live.
-- **CI:** [run 37051549653](https://github.com/frostyard/apt-publisher/actions/runs/37051549653)
-  passed on `main`: config checks, then all 120 end-to-end checks.
+- **CI:** [run 37151352797](https://github.com/frostyard/apt-publisher/actions/runs/37151352797)
+  passed on `main`: config checks, then all 132 end-to-end checks.
 - **Infrastructure is in place.**
   - The `frostyard-apt-state` bucket and an R2 token exist.
   - The `apt-repository` environment is limited to `main` and holds all
@@ -53,7 +53,6 @@ Delete it once it's stale.
 - **updex is the first migrated producer.**
   - Its release requests publication with `publish-deb`
     (frostyard/updex#432).
-  - The org secret `APT_PUBLISH_TOKEN` is shared with updex only.
   - **v2.0.2 went through the whole path on 2026-10-02.**
     - The release ran
       [goreleaser run 37058579495](https://github.com/frostyard/updex/actions/runs/37058579495),
@@ -66,15 +65,46 @@ Delete it once it's stale.
       on trixie and forky for amd64 and arm64.
     - Finally it dispatched `build` to snosi, whose Build Image Variants
       and Build Installer ISO started at 20:13:57.
-  - **Those snosi builds still install updex 2.0.1.** snosi reads the
-    frozen `stable` suite until Plan 0009 Phase 5 moves it to `/debian/`
-    `trixie`, so the rebuild fan-out has no effect on images until then.
+- **incus is migrated** (Plan 0009 Phase 4; frostyard/incus#6,
+  frostyard/incus#7, frostyard/apt-publisher#7).
+  - Each push to incus's `stable` branch builds Debian 13 amd64 and
+    publishes a GitHub release of exactly five `.deb` files.
+  - The build then requests `trixie` only. incus is registered
+    `attested=no`, because its attestations name `refs/heads/stable`.
+  - Incus 7.5.1 was published on 2026-10-03 by
+    [publish run 37153494023](https://github.com/frostyard/apt-publisher/actions/runs/37153494023)
+    as `1:7.5.1-debian13-202610032056`, into snapshot
+    `trixie-20261003T210024Z-incus-7.5.1-debian13-202610032056`. forky
+    gets none.
+  - `stable` on incus is protected by a "Protect stable" ruleset, the same
+    as apt-publisher's `main`.
+  - incus's release workflow is *generated* by `sync-docker-build.py`;
+    change the generator, not `builds-docker.yml`.
+- **snosi reads `/debian/` `trixie`** (Plan 0009 Phase 5, done 2026-10-03;
+  frostyard/snosi#1042).
+  - Its images pick up each producer's publication, starting with updex
+    2.0.2 and incus 7.5.1.
+  - Its sysext publication, still through repogen, leaves both Debian trees
+    untouched.
+- **Legacy `stable` is protected again.**
+  - Producers pinned to pre-refusal `publish-to-r2` commits wrote it after
+    the freeze: incus 7.4 on 2026-09-16 at `v0.4.1`, and firn 0.6.0 on
+    2026-10-01 at `6648671`.
+  - On 2026-10-03 the org's `R2_*` and `REPOGEN_GPG_KEY` secrets were
+    limited to snosi.
+  - Core's drift alarm was re-baselined on the explained state
+    (frostyard/core#153). It passes:
+    [run 37151554483](https://github.com/frostyard/core/actions/runs/37151554483).
+- **`APT_PUBLISH_TOKEN`** (org secret) is visible to updex, incus, firn and
+  chairlift. This was checked per repo on 2026-10-03; the full list needs
+  `admin:org`.
 - **CDN cache rules are in place** (Plan 0009 Phase 3, done 2026-10-03):
   `/debian/pool/` and `by-hash` are cached at the edge; the indexes and
   errors are not. See "The CDN" below.
-- **Not yet moved:**
-  - every other producer (Plan 0009 Phase 4);
-  - snosi, which still reads `stable` (Phase 5).
+- **Not yet moved** (Plan 0009 Phase 4): bootc-debian, chairlift,
+  intuneme, first-setup, firn, pilothouse, snowcat-cockpit and gchlog. Their
+  old repogen steps now fail for lack of credentials instead of writing
+  `stable`. After that comes forky (Phase 6).
 
 ## Why this exists
 
@@ -221,17 +251,19 @@ it doesn't carry.
      `APT_PUBLISH_TOKEN` without disturbing the existing list:
      `gh api -X PUT orgs/frostyard/actions/secrets/APT_PUBLISH_TOKEN/repositories/$(gh api repos/frostyard/<repo> --jq .id)`.
      Avoid `gh secret set --org --repos`, which *replaces* the list.
-  3. **Change the producer's release workflow.** frostyard/updex#432 is
-     the template, including its contract test and Tier 4 PR description.
-     Then remove the repo from the org secrets it no longer needs:
-     `REPOGEN_GPG_KEY`, `R2_*`, `CLOUDFLARE_*` and `ORG_PAT`. snosi still
-     uses some of them for sysexts.
+  3. **Change the producer's release workflow.**
+     - frostyard/updex#432 is the template for tag-released Go producers,
+       including its contract test and Tier 4 PR description.
+     - frostyard/incus#6 is the template for producers that release from
+       branch pushes.
+     - `R2_*` and `REPOGEN_GPG_KEY` are already limited to snosi, so no
+       producer needs them removed.
 
   Producer-specific notes:
-  - **incus versions carry `-debian13-`, which is not a `~debNN` marker.**
-    `publish.sh` would route such a version to every target codename.
-    Register incus for `trixie` only until its versions carry `~deb13` or
-    `~deb14`.
+  - **incus (done).** Its versions carry `-debian13-`, which is not a
+    `~debNN` marker, so it is registered for `trixie` only. A forky build
+    would append `~deb14`; `-debianNN-` already orders a Debian 13 build
+    below a Debian 14 build.
   - **bootc-debian was made public on 2026-10-03,** so `fetch-release.sh`
     and the audit read its releases with `github.token`. Private producers
     still need a token with Contents read, or to go public.
@@ -249,9 +281,7 @@ it doesn't carry.
     - Both `frostyard-igloo` and `igloo` exist, from a rename.
     - `kapsule*` has no producer: `github.com/frostyard/kapsule` doesn't
       exist.
-- **Phase 5, snosi.** Change `mkosi.sandbox/etc/apt/sources.list.d/frostyard.sources`
-  to `URIs: https://repository.frostyard.org/debian/` and `Suites: trixie`,
-  keeping the same keyring.
+- **Phase 5, snosi.** Done 2026-10-03 (frostyard/snosi#1042).
 - **Phase 7, audit.** Set the repository variable `APT_AUDIT_ENABLED=true`
   once producers publish through apt-publisher.
 - **Visibility (optional).** The org is on the Team plan, so the
