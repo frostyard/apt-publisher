@@ -69,10 +69,12 @@ Delete it once it's stale.
   - **Those snosi builds still install updex 2.0.1.** snosi reads the
     frozen `stable` suite until Plan 0009 Phase 5 moves it to `/debian/`
     `trixie`, so the rebuild fan-out has no effect on images until then.
+- **CDN cache rules are in place** (Plan 0009 Phase 3, done 2026-10-03):
+  `/debian/pool/` and `by-hash` are cached at the edge; the indexes and
+  errors are not. See "The CDN" below.
 - **Not yet moved:**
   - every other producer (Plan 0009 Phase 4);
-  - snosi, which still reads `stable` (Phase 5);
-  - the CDN cache rules (Phase 3).
+  - snosi, which still reads `stable` (Phase 5).
 
 ## Why this exists
 
@@ -174,11 +176,15 @@ Re-check these if versions change:
     rclone's `Cloudflare` provider restores and saves the state;
   - `verify --deep` passed, so R2 ETags are MD5s for aptly's uploads;
   - the zone accepts a purge of 30 URLs in one request.
-- **The CDN caches nothing.**
+- **The CDN.**
   - `repository.frostyard.org` serves any bucket prefix: `/debian-test/`
-    worked with no setup, so `/debian/` will too.
-  - Every response is `cf-cache-status: DYNAMIC`, the immutable `by-hash`
-    indexes included (checked 2026-10-02).
+    worked with no setup.
+  - Without a rule, every response was `cf-cache-status: DYNAMIC`, the
+    immutable `by-hash` indexes included (checked 2026-10-02).
+  - Cloudflare's "Ignore cache-control header and use this TTL" applies to
+    every status code. A 404 is cached for the full TTL unless a Status
+    code TTL exempts it. Status code TTLs accept `no-store` and work on
+    every plan.
 
 ## Next steps: Plan 0009
 
@@ -186,24 +192,27 @@ Plan 0009 has the phases, the producer checklist (ordered by what snosi
 installs) and the done-when conditions. Below are the apt-publisher details
 it doesn't carry.
 
-- **Phase 3, cache rules.** Not done yet; do it before snosi moves (Phase 5).
-  - [ ] Add a Cache Rule on the `frostyard.org` zone: Caching →
-    Cache Rules → Create rule.
-    - Name: `apt immutable`.
-    - Custom filter expression:
-      `starts_with(http.request.uri.path, "/debian/pool/") or (starts_with(http.request.uri.path, "/debian/dists/") and http.request.uri.path contains "/by-hash/")`.
-    - Cache eligibility: Eligible for cache.
-    - Edge TTL: ignore cache-control header, 1 year.
-    - Browser TTL: 1 year.
-  - [ ] Leave the mutable indexes uncached: `InRelease`, `Release`,
-    `Release.gpg` and `main/binary-*/Packages*`. If a rule ever caches
-    them, `purge-cache.sh` purges exactly those after each publish.
-  - [ ] Check it: request a `by-hash` URL twice and expect
-    `cf-cache-status: HIT` the second time, while `InRelease` stays
-    `DYNAMIC`.
+- **Phase 3, cache rules. Done 2026-10-03.** The `frostyard.org` zone has
+  one Cache Rule, `apt immutable`:
+  - Custom filter expression:
+    `http.host eq "repository.frostyard.org" and (starts_with(http.request.uri.path, "/debian/pool/") or (starts_with(http.request.uri.path, "/debian/dists/") and http.request.uri.path contains "/by-hash/"))`.
+  - Cache eligibility: Eligible for cache.
+  - Edge TTL: ignore cache-control header, 1 year, plus a Status code TTL of
+    `no-store` for status codes 400 and up, so errors are never cached.
+  - Browser TTL: Respect origin. apt gains nothing from browser caching,
+    and overriding would give proxies such as apt-cacher-ng long lifetimes
+    for error responses.
   - Why that's safe: pool files never change under the same name (the
     publisher refuses different bytes for an existing version), and
     `by-hash` paths are content-addressed.
+  - The mutable indexes (`InRelease`, `Release`, `Release.gpg`,
+    `Packages*`) stay uncached. `purge-cache.sh` still purges them after
+    each publish, as a safety net.
+  - Checked on 2026-10-03: a `by-hash` index and
+    `frostyard-updex_2.0.2_amd64.deb` returned `MISS`, then `HIT`. A
+    missing file returned `BYPASS` twice. `InRelease` returned `DYNAMIC`.
+  - Keep any later rule in the zone from matching these paths with
+    "Bypass cache"; a later matching rule overrides this one.
 - **Phase 4, moving a producer.** The apt-publisher side has three steps:
   1. **Register it.** Add a line to `config/producers.tsv` by PR, since
      `main` is protected. `tests/check-config.sh` validates the file.
