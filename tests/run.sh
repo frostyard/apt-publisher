@@ -97,6 +97,7 @@ cat >"$tmp/producers.tsv" <<'EOF'
 frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi
 frostyard/bootc-debian	bootc,libostree-*	trixie,forky	no	-
 frostyard/trixie-only	trixie-thing	trixie	no	-
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi
 EOF
 
 # Fail instead of hanging if the local server stalls.
@@ -123,7 +124,8 @@ scope debian
 # run SCRIPT ARGS... runs a publisher script as a fresh runner.
 run() { APTLY_ROOT=$(mktemp -d "$tmp/runner.XXXXXX") "$ROOT/scripts/$1" "${@:2}"; }
 
-# mkdeb DIR NAME VERSION ARCH [CONTENT] builds DIR/NAME_VERSION_ARCH.deb.
+# mkdeb DIR NAME VERSION ARCH [CONTENT] builds DIR/NAME_VERSION_ARCH.deb, with
+# the epoch left out of the file name as Debian does.
 mkdeb() {
 	local dir=$1 name=$2 version=$3 arch=$4 src
 	src=$(mktemp -d "$tmp/build.XXXXXX")
@@ -131,7 +133,7 @@ mkdeb() {
 	printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: test <test@invalid>\nDescription: test package\n' \
 		"$name" "$version" "$arch" >"$src/DEBIAN/control"
 	printf '%s\n' "${5:-$name $version $arch}" >"$src/usr/share/doc/$name/content"
-	dpkg-deb --root-owner-group -b "$src" "$dir/${name}_${version}_${arch}.deb" >/dev/null
+	dpkg-deb --root-owner-group -b "$src" "$dir/${name}_${version#*:}_${arch}.deb" >/dev/null
 }
 
 # Legacy repogen-shaped suite: dists/stable with binary-all and binary-amd64.
@@ -259,12 +261,21 @@ check "dry run routes ~deb13 to trixie" grep -q 'bootc_1.16.8-1~deb13_amd64.deb 
 check "dry run routes ~deb14 to forky" grep -q 'bootc_1.16.8-1~deb14_amd64.deb -> forky' "$tmp/err"
 check "dry run touches no state" test -z "$(ls -A "$tmp/s3/frostyard-apt-state")"
 
+# incus-style -debian13- is not a marker, so it goes to every target: why incus
+# is registered for trixie only.
+mkdeb "$tmp/unmarked" bootc '1:1.0-debian13-202610031200' amd64
+must_pass "dry run of a -debian13- build" \
+	run publish.sh --producer frostyard/bootc-debian --debs "$tmp/unmarked" --dry-run
+check "-debian13- is not a codename marker" \
+	grep -q 'bootc_1.0-debian13-202610031200_amd64.deb -> forky' "$tmp/err"
+
 # --- import of the legacy suite -----------------------------------------------
 
 mkdeb "$tmp/legacy-debs" frostyard-updex 2.0.0 amd64
 mkdeb "$tmp/legacy-debs" frostyard-updex 2.0.1 amd64
 mkdeb "$tmp/legacy-debs" docs-thing 1.0 all
 mkdeb "$tmp/legacy-debs" libfoo1 1.0-1 amd64
+mkdeb "$tmp/legacy-debs" incus '1:7.4-debian13-202609161516' amd64
 make_legacy "$tmp/legacy"
 
 cp -a "$tmp/legacy" "$tmp/legacy-tampered"
@@ -294,6 +305,7 @@ import_snapshot=$(cut -d' ' -f2 "$tmp/out")
 check "import publishes every legacy version" listed trixie frostyard-updex 2.0.0
 check "import publishes the newest legacy version" listed trixie frostyard-updex 2.0.1
 check "import keeps arch:all packages" listed trixie docs-thing 1.0
+check "import keeps epoch versions" listed trixie incus '1:7.4-debian13-202609161516'
 check "import ignores files outside the manifest" not_listed trixie smuggled 6.6.6
 check "published suite is by-hash" grep -qx 'Acquire-By-Hash: yes' "$pub/dists/trixie/Release"
 check "apt reads the imported suite" candidate_is trixie amd64 frostyard-updex 2.0.1
@@ -322,6 +334,23 @@ check "trixie gets the ~deb13 build" listed trixie bootc '1.16.8-1~deb13'
 check "trixie does not get the ~deb14 build" not_listed trixie bootc '1.16.8-1~deb14'
 check "forky gets the ~deb14 build" listed forky bootc '1.16.8-1~deb14'
 check "apt on forky prefers ~deb14" candidate_is forky amd64 bootc '1.16.8-1~deb14'
+
+# incus versions have an epoch, a UTC build time and -debian13-, which is not a
+# codename marker. Its registration limits it to trixie.
+incus_version='1:7.5.1-debian13-202610031200'
+for name in incus incus-base incus-client incus-extra incus-ui-canonical; do
+	mkdeb "$tmp/incus" "$name" "$incus_version" amd64
+done
+must_pass "publish an incus build" run publish.sh --producer frostyard/incus --debs "$tmp/incus" \
+	--label incus-7.5.1-debian13-202610031200 --report "$tmp/incus-report.tsv"
+check "incus routes to its registered codename" \
+	grep -q 'incus_7.5.1-debian13-202610031200_amd64.deb -> trixie' "$tmp/err"
+check "incus publishes trixie only" test "$(cut -d' ' -f1 "$tmp/out")" = trixie
+check "trixie lists the new incus build" listed trixie incus-ui-canonical "$incus_version"
+check "trixie keeps the imported incus build" listed trixie incus '1:7.4-debian13-202609161516'
+check "forky gets no incus build" not_listed forky incus "$incus_version"
+check "apt on trixie prefers the newer epoch version" candidate_is trixie amd64 incus "$incus_version"
+must_pass "the canary downloads epoch versions" run apt-canary.sh --report "$tmp/incus-report.tsv"
 
 # --- refusals leave the published suite untouched ---------------------------------
 
@@ -513,13 +542,17 @@ scope audit
 mkdeb "$tmp/audit-updex" frostyard-updex 3.1.0 amd64
 mkdeb "$tmp/audit-bootc" bootc '2.1-1~deb13' amd64
 mkdeb "$tmp/audit-thing" trixie-thing 1.0 amd64
+mkdeb "$tmp/audit-incus" incus '1:7.5.1-debian13-202610031200' amd64
 must_pass "publish updex for the audit" run publish.sh --producer frostyard/updex --debs "$tmp/audit-updex"
 must_pass "publish bootc for the audit" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/audit-bootc"
 must_pass "publish trixie-thing for the audit" run publish.sh --producer frostyard/trixie-only --debs "$tmp/audit-thing"
+must_pass "publish incus for the audit" run publish.sh --producer frostyard/incus --debs "$tmp/audit-incus"
 release() { jq -n --arg t "$2" '{tagName: $t, assets: ($ARGS.positional | map({name: .}))}' --args "${@:3}" >"$tmp/gh/$1.json"; }
 release frostyard_updex v3.1.0 frostyard-updex_3.1.0_amd64.deb checksums.txt
 release frostyard_bootc-debian v2.1 'bootc_2.1-1~deb13_amd64.deb'
 release frostyard_trixie-only v1.0 trixie-thing_1.0_amd64.deb
+# Asset names omit the epoch that the indexes list.
+release frostyard_incus 7.5.1-debian13-202610031200 incus_7.5.1-debian13-202610031200_amd64.deb
 must_pass "the audit passes when every latest release is published" \
 	env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh"
 release frostyard_updex v3.2.0 frostyard-updex_3.2.0_amd64.deb

@@ -142,6 +142,10 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
   - The publisher routes each build to the matching codename only.
   - `~deb13` sorts below `~deb14`, so upgrading from trixie to forky picks up
     the forky build.
+  - incus is the exception for now. Its versions
+    (`1:7.5.1-debian13-202610031200`) carry `-debian13-`, which is not a
+    marker, so it is registered for `trixie` only until they carry `~deb13`
+    or `~deb14`.
 
 Clients:
 
