@@ -232,11 +232,13 @@ it doesn't carry.
     `publish.sh` would route such a version to every target codename.
     Register incus for `trixie` only until its versions carry `~deb13` or
     `~deb14`.
-  - **bootc-debian is private.** `fetch-release.sh` (in publish) and the
-    audit use `github.token`, which can't read another private repo's
-    releases. Give them a token with Contents read on private producers,
-    or make those repos public. Its releases are manual, and it isn't
-    attested, so register it `attested=no`.
+  - **bootc-debian was made public on 2026-10-03,** so `fetch-release.sh`
+    and the audit read its releases with `github.token`. Private producers
+    still need a token with Contents read, or to go public.
+    - It is registered `trixie` only and `attested=no`: it releases from
+      manual runs on `main`, so its provenance names `refs/heads/main`.
+    - Its versions carry `~deb13`. GitHub lists release assets with `.` in
+      place of `~`, and aptly keeps those names for the pool files.
   - Producers without build attestations use `attested=no` until they add
     `actions/attest-build-provenance`.
   - Package names in `stable`: `frostyard-*`, `incus*`, `bootc`,

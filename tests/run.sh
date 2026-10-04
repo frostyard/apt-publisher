@@ -352,6 +352,28 @@ check "forky gets no incus build" not_listed forky incus "$incus_version"
 check "apt on trixie prefers the newer epoch version" candidate_is trixie amd64 incus "$incus_version"
 must_pass "the canary downloads epoch versions" run apt-canary.sh --report "$tmp/incus-report.tsv"
 
+# bootc-debian: trixie was seeded with unmarked builds; its releases now carry
+# one build stamp and ~deb13, and GitHub serves their assets with . in place
+# of ~. Routing and versions come from the packages, not the file names.
+mkdeb "$tmp/bootc-seeded" bootc 1.16.8-frostyard202608140040 amd64
+mkdeb "$tmp/bootc-seeded" libostree-1-1 2026.3-frostyard202608140040 amd64
+must_pass "publish the seeded bootc-debian builds" run publish.sh --producer frostyard/bootc-debian \
+	--debs "$tmp/bootc-seeded" --codenames trixie
+bootc_rev=frostyard202610040130~deb13
+mkdeb "$tmp/bootc-release" bootc "1.16.8-$bootc_rev" amd64
+mkdeb "$tmp/bootc-release" libostree-1-1 "2026.3-$bootc_rev" amd64
+for f in "$tmp"/bootc-release/*.deb; do mv "$f" "${f//\~/.}"; done
+must_pass "publish a release with GitHub's asset names" run publish.sh --producer frostyard/bootc-debian \
+	--debs "$tmp/bootc-release" --codenames trixie --report "$tmp/bootc-report.tsv"
+check "renamed assets route by their ~deb13 versions" \
+	grep -q 'libostree-1-1_2026.3-frostyard202610040130.deb13_amd64.deb -> trixie' "$tmp/err"
+check "trixie lists the ~deb13 versions" listed trixie libostree-1-1 "2026.3-$bootc_rev"
+check "trixie keeps the seeded build" listed trixie libostree-1-1 2026.3-frostyard202608140040
+check "apt prefers the ~deb13 bootc to the seeded one" candidate_is trixie amd64 bootc "1.16.8-$bootc_rev"
+check "apt prefers the ~deb13 libostree-1-1 to the seeded one" \
+	candidate_is trixie amd64 libostree-1-1 "2026.3-$bootc_rev"
+must_pass "the canary downloads ~deb13 versions" run apt-canary.sh --report "$tmp/bootc-report.tsv"
+
 # --- refusals leave the published suite untouched ---------------------------------
 
 before=$(inrelease trixie)
@@ -541,6 +563,7 @@ check "the other producer's release is published" listed trixie bootc '1.0-1~deb
 scope audit
 mkdeb "$tmp/audit-updex" frostyard-updex 3.1.0 amd64
 mkdeb "$tmp/audit-bootc" bootc '2.1-1~deb13' amd64
+mkdeb "$tmp/audit-bootc" libostree-1-1 '2.1-1~deb13' amd64
 mkdeb "$tmp/audit-thing" trixie-thing 1.0 amd64
 mkdeb "$tmp/audit-incus" incus '1:7.5.1-debian13-202610031200' amd64
 must_pass "publish updex for the audit" run publish.sh --producer frostyard/updex --debs "$tmp/audit-updex"
@@ -549,7 +572,8 @@ must_pass "publish trixie-thing for the audit" run publish.sh --producer frostya
 must_pass "publish incus for the audit" run publish.sh --producer frostyard/incus --debs "$tmp/audit-incus"
 release() { jq -n --arg t "$2" '{tagName: $t, assets: ($ARGS.positional | map({name: .}))}' --args "${@:3}" >"$tmp/gh/$1.json"; }
 release frostyard_updex v3.1.0 frostyard-updex_3.1.0_amd64.deb checksums.txt
-release frostyard_bootc-debian v2.1 'bootc_2.1-1~deb13_amd64.deb'
+# GitHub lists uploaded asset names with . in place of ~; match either.
+release frostyard_bootc-debian v2.1 bootc_2.1-1.deb13_amd64.deb 'libostree-1-1_2.1-1~deb13_amd64.deb'
 release frostyard_trixie-only v1.0 trixie-thing_1.0_amd64.deb
 # Asset names omit the epoch that the indexes list.
 release frostyard_incus 7.5.1-debian13-202610031200 incus_7.5.1-debian13-202610031200_amd64.deb

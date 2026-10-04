@@ -25,3 +25,10 @@ frostyard/firn	frostyard-firn	trixie,forky	yes	frostyard/snosi
 frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	yes	frostyard/snosi
 # Python, Architecture: all, built and tested on trixie only so far.
 frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi
+# bootc (Rust) and libostree-1-1 (C) link trixie's libraries, so their versions
+# carry ~deb13. trixie only until a ~deb14 forky build exists, which must also
+# sort above forky's own libostree-1-1 (2026.4-1). Exact names, not libostree-*,
+# keep it from shadowing Debian's other libostree packages.
+# Not attested: it releases from manual workflow_dispatch runs on main, so its
+# provenance names refs/heads/main rather than the release tag.
+frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi

@@ -18,13 +18,14 @@ tmp=$(mktemp -d)
 missing=0
 
 # listed_anywhere NAME VERSION ARCH CODENAME... compares versions without
-# their epoch, which .deb file names omit.
+# their epoch, which .deb file names omit, and with ~ read as ., since GitHub
+# lists an uploaded bootc_1.0~deb13_amd64.deb as bootc_1.0.deb13_amd64.deb.
 listed_anywhere() {
-	local name=$1 version=$2 arch=$3 codename
+	local name=$1 version=${2//\~/.} arch=$3 codename
 	shift 3
 	for codename in "$@"; do
 		awk -F'\t' -v n="$name" -v v="$version" -v a="$arch" \
-			'{ ver = $5; sub(/^[0-9]+:/, "", ver) } $4 == n && ver == v && $6 == a { found = 1 } END { exit !found }' \
+			'{ ver = $5; sub(/^[0-9]+:/, "", ver); gsub(/~/, ".", ver) } $4 == n && ver == v && $6 == a { found = 1 } END { exit !found }' \
 			"$tmp/$codename.tsv" && return 0
 	done
 	return 1
