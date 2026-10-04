@@ -32,8 +32,15 @@ Delete it once it's stale.
   - It exists because `APT_PUBLISH_TOKEN` needs Contents: write here, which
     would otherwise let a leaked token push a workflow to `main`, where the
     secrets live.
-- **CI:** [run 37151352797](https://github.com/frostyard/apt-publisher/actions/runs/37151352797)
-  passed on `main`: config checks, then all 132 end-to-end checks.
+  - Since 2026-10-03 23:25 UTC, an organization ruleset, "default branch:
+    humans merge", also requires 1 approving review on every repo's default
+    branch, including approval of the last push.
+    - Org admins can bypass it.
+    - Agents open PRs and humans merge them. PRs authored under the owner's
+      account can't be self-approved, so they merge only through the admin
+      bypass.
+- **CI:** [run 37168718053](https://github.com/frostyard/apt-publisher/actions/runs/37168718053)
+  passed on `main`: config checks, then all 140 end-to-end checks.
 - **Infrastructure is in place.**
   - The `frostyard-apt-state` bucket and an R2 token exist.
   - The `apt-repository` environment is limited to `main` and holds all
@@ -95,16 +102,43 @@ Delete it once it's stale.
   - Core's drift alarm was re-baselined on the explained state
     (frostyard/core#153). It passes:
     [run 37151554483](https://github.com/frostyard/core/actions/runs/37151554483).
-- **`APT_PUBLISH_TOKEN`** (org secret) is visible to updex, incus, firn and
-  chairlift. This was checked per repo on 2026-10-03; the full list needs
-  `admin:org`.
+- **Every producer snosi installs from now publishes through apt-publisher.**
+  The first release of each went through the whole path: release,
+  `publish-deb`, routing, read-back, canary and the snosi `build` dispatch.
+  Each was checked from outside afterwards.
+
+  | Producer | First release through apt-publisher | Codenames | Attested |
+  | --- | --- | --- | --- |
+  | updex | v2.0.2, 2026-10-02 | trixie, forky | yes |
+  | incus | 7.5.1, 2026-10-03 | trixie | no (branch-push releases) |
+  | intuneme | v0.20.3, 2026-10-04 | trixie, forky | yes |
+  | firn | v0.6.1, 2026-10-04 | trixie, forky (amd64 and arm64) | yes |
+  | first-setup | v0.4.1, 2026-10-04 | trixie | yes |
+  | bootc-debian | `bootc-1.16.8-ostree-2026.3-202610040153`, 2026-10-04 | trixie (`~deb13`) | no (manual runs on `main`) |
+  | chairlift | v0.11.2, 2026-10-04 | trixie (amd64 and arm64) | yes |
+
+  - The producer PRs were frostyard/intuneme#204, frostyard/firn#104,
+    frostyard/chairlift#239, frostyard/first-setup#30 and
+    frostyard/bootc-debian#8. Registrations: #9 and #10 here.
+  - The attested producers' tag-ref attestation also refuses their nightly
+    `dev` prereleases, whose `1.0.0.dev` versions would sort above real
+    releases.
+  - `APT_PUBLISH_TOKEN` (org secret) is visible to every producer above.
+- **Not ported, by decision on 2026-10-04:** pilothouse, snowcat-cockpit and
+  gchlog. snosi doesn't install them from APT, and their old repogen deb
+  steps fail for lack of credentials.
+- **snosi image builds are blocked by Debian, not by Frostyard.**
+  - Since 2026-10-03 20:20 UTC, every 6.18+ trixie-backports kernel is
+    uninstallable: its `linux-base-<abi>` and `linux-modules-<abi>` packages
+    are gone. `linux-signed-amd64` 7.2.6 waits in `backports-new`.
+  - frostyard/snosi#1043 moves the secure profiles' kernel to forky 7.2.8
+    until that queue is processed.
+  - The installer ISO builds are unaffected.
 - **CDN cache rules are in place** (Plan 0009 Phase 3, done 2026-10-03):
   `/debian/pool/` and `by-hash` are cached at the edge; the indexes and
   errors are not. See "The CDN" below.
-- **Not yet moved** (Plan 0009 Phase 4): bootc-debian, chairlift,
-  intuneme, first-setup, firn, pilothouse, snowcat-cockpit and gchlog. Their
-  old repogen steps now fail for lack of credentials instead of writing
-  `stable`. After that comes forky (Phase 6).
+- **Next:** forky (Plan 0009 Phase 6) and the audit (Phase 7). See "Next
+  steps" below.
 
 ## Why this exists
 
@@ -264,7 +298,7 @@ it doesn't carry.
     `~debNN` marker, so it is registered for `trixie` only. A forky build
     would append `~deb14`; `-debianNN-` already orders a Debian 13 build
     below a Debian 14 build.
-  - **bootc-debian was made public on 2026-10-03,** so `fetch-release.sh`
+  - **bootc-debian was made public on 2026-10-04,** so `fetch-release.sh`
     and the audit read its releases with `github.token`. Private producers
     still need a token with Contents read, or to go public.
     - It is registered `trixie` only and `attested=no`: it releases from
@@ -282,6 +316,26 @@ it doesn't carry.
     - `kapsule*` has no producer: `github.com/frostyard/kapsule` doesn't
       exist.
 - **Phase 5, snosi.** Done 2026-10-03 (frostyard/snosi#1042).
+- **Phase 6, forky.**
+  - intuneme, firn and updex already publish to forky: static builds, the
+    same file in both codenames.
+  - chairlift and first-setup are trixie-only until a smoke test on a forky
+    image. chairlift's GTK4/libadwaita are loaded at runtime with no
+    `Depends`; first-setup's dependencies all exist in forky.
+  - bootc-debian needs:
+    - a `debian:forky` build with `~deb14` versions and per-codename
+      `Depends`;
+    - an ostree at least 2026.4, because Debian forky ships libostree
+      2026.4-1 (frostyard/bootc-debian#5 bumps it).
+  - incus needs a Debian 14 build with `~deb14`.
+- **Hardening ideas.** Each is a new refusal, so each needs a test:
+  - Refuse a `.deb` whose asset name isn't `<name>_<version>_<arch>.deb`,
+    with the epoch dropped and GitHub's `~`→`.` rename accepted.
+    first-setup's unversioned legacy asset showed the collision risk.
+  - Check *which workflow* signed an attestation, with `--signer-workflow`
+    or a tag pattern, not only `--source-ref refs/tags/<tag>`.
+    firn's and updex's release workflows run on any tag, and their tag
+    rulesets protect only `v*`.
 - **Phase 7, audit.** Set the repository variable `APT_AUDIT_ENABLED=true`
   once producers publish through apt-publisher.
 - **Visibility (optional).** The org is on the Team plan, so the
