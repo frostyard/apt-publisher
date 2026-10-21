@@ -7,9 +7,10 @@ workflow publishes the release to
 `https://repository.frostyard.org/debian`, under explicit codenames
 (`trixie`, `forky`).
 
-> **Status: prototype.** The scripts pass an end-to-end test against a
-> local S3 server, but have not run against R2 yet. See
-> [Before production](#before-production).
+> **Status: in production since 2026-10-02.** It publishes `trixie` and
+> `forky` at `https://repository.frostyard.org/debian/`. The order of the
+> remaining work is in core
+> [Plan 0009](https://github.com/frostyard/core/blob/main/docs/plans/0009-debian-publication-through-apt-publisher.md).
 
 It replaces repogen's `publish-to-r2` Debian path. That path is already
 disabled ("Debian publication requires the reviewed target-scoped
@@ -269,14 +270,14 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
 
 `KEEP_TMP=1` keeps its work directory for inspection.
 
-## Before production
+## Production notes
 
-- **R2:** run once against R2 with `APT_PREFIX=debian-test` and a scratch
-  state path. This confirms aptly's S3 client (`region: auto`, `acl: none`)
-  and rclone's Cloudflare provider.
-- **CDN:** confirm the zone serves `/debian/` from the bucket with cache
-  rules that suit `dists/`. by-hash files are immutable; `InRelease` is
-  purged after each publish.
+- **R2:** done 2026-10-02. A trial against real R2 under a scratch prefix
+  passed publish, deep verify, a CDN canary, withdraw, rollback and a cache
+  purge (core Plan 0009, Phase 1).
+- **CDN:** done 2026-10-03. The Cache Rule `apt immutable` caches
+  `/debian/pool/` and `by-hash` paths at the edge; `InRelease`, `Release` and
+  `Packages*` stay uncached (core Plan 0009, Phase 3).
 - **actionlint:** actionlint (1.7.12 included) doesn't know the
   concurrency `queue` key yet, so `.github/actionlint.yaml` ignores that one
   error. `tests/check-config.sh` asserts every workflow using the
@@ -285,5 +286,8 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
   after the import. aptly reads a pool file only when a snapshot references
   a package the bucket lacks, so a database-only restore with on-demand pool
   fetches is a possible later optimisation.
-- **ADR:** decide whether [ADR-0001](docs/adr/0001-aptly-single-writer.md)
-  belongs here or in `frostyard/core` next to ADR-0048.
+- **ADR:** core
+  [ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md)
+  records the organization decision.
+  [ADR-0001](docs/adr/0001-aptly-single-writer.md) records this repository's
+  side.

@@ -124,9 +124,12 @@ Delete it once it's stale.
     `dev` prereleases, whose `1.0.0.dev` versions would sort above real
     releases.
   - `APT_PUBLISH_TOKEN` (org secret) is visible to every producer above.
-- **Not ported, by decision on 2026-10-04:** pilothouse, snowcat-cockpit and
-  gchlog. snosi doesn't install them from APT, and their old repogen deb
-  steps fail for lack of credentials.
+- **Not ported, by decision on 2026-10-04:** pilothouse and snowcat-cockpit.
+  snosi doesn't install them from APT, and their old repogen deb steps fail
+  for lack of credentials. snowcat-cockpit is archived.
+- **gchlog is retired** (archived 2026-10-21). It was never registered or
+  published. The `trixie` migration needs no separate canary: seven producers
+  publish to it.
 - **snosi image builds are blocked by Debian, not by Frostyard.**
   - Since 2026-10-03 20:20 UTC, every 6.18+ trixie-backports kernel is
     uninstallable: its `linux-base-<abi>` and `linux-modules-<abi>` packages
