@@ -32,3 +32,9 @@ frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi
 # Not attested: it releases from manual workflow_dispatch runs on main, so its
 # provenance names refs/heads/main rather than the release tag.
 frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi
+# Omarchy apps for snosi's flurry desktop and its moonlight and voxtype sysexts.
+# Exact names: gpu-screen-recorder is also a Debian package (forky, sid).
+# Built in debian:trixie against trixie's libraries without a ~deb13 marker, so
+# trixie only. Not attested: it releases from pushes to main, so its provenance
+# names refs/heads/main rather than the release tag.
+frostyard/omarchy-apps	aether,cliamp,gpu-screen-recorder,herdr,hyprland-preview-share-picker,moonlight-qt,omacalc,omacut,omawrite,tensaku,ttfx,voxtype	trixie	no	frostyard/snosi
