@@ -1,5 +1,9 @@
-# codename	debian-major	architectures
+# codename	debian-major	architectures	components
 # A package version carrying a ~debNN or +debNN marker may only be published
 # to the codename whose debian-major is NN. Unmarked versions may go anywhere.
-trixie	13	amd64,arm64,all
-forky	14	amd64,arm64,all
+#
+# components  comma-separated components the codename publishes: main, or
+#             main,image (core ADR-0059). No codename publishes image yet; a
+#             later change enables it per codename (ADR-0059 step 3).
+trixie	13	amd64,arm64,all	main
+forky	14	amd64,arm64,all	main

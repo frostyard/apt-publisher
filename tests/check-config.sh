@@ -17,19 +17,26 @@ fpr=$(gpg --show-keys --with-colons "$APT_KEYRING" | awk -F: '/^fpr/ { print $10
 	fail "keys/frostyard.gpg ($fpr) is not APT_SIGNING_KEY_FPR ($APT_SIGNING_KEY_FPR)"
 
 awk -F'\t' '!/^#/ && NF {
-	if (NF != 3 || $2 !~ /^[0-9]+$/ || $3 !~ /^[a-z0-9]+(,[a-z0-9]+)*$/) { print "codenames.tsv line " NR ": malformed"; bad = 1 }
-	if (seen[$2]++) { print "codenames.tsv line " NR ": duplicate Debian major " $2; bad = 1 }
+	if (NF != 4 || $2 !~ /^[0-9]+$/ || $3 !~ /^[a-z0-9]+(,[a-z0-9]+)*$/) { print "codenames.tsv line " FNR ": expected 4 columns: codename, Debian major, architectures, components"; bad = 1; next }
+	if ($4 != "main" && $4 != "main,image") { print "codenames.tsv line " FNR ": components must be main or main,image"; bad = 1 }
+	if (seen[$2]++) { print "codenames.tsv line " FNR ": duplicate Debian major " $2; bad = 1 }
 } END { exit bad }' "$APT_CODENAMES_FILE" >&2 || fail "codenames.tsv"
 
-codenames=$(awk -F'\t' '!/^#/ && NF { print $1 }' "$APT_CODENAMES_FILE")
-awk -F'\t' -v known="$(tr '\n' , <<<"$codenames")" '!/^#/ && NF {
-	if (NF != 5) { print "producers.tsv line " NR ": expected 5 tab-separated columns"; bad = 1; next }
-	if ($1 !~ /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) { print "producers.tsv line " NR ": bad repository " $1; bad = 1 }
-	if ($4 != "yes" && $4 != "no") { print "producers.tsv line " NR ": attested must be yes or no"; bad = 1 }
+# producers.tsv: 6 columns, the last one the component, which every codename
+# the producer lists must publish (read from codenames.tsv, the first file).
+awk -F'\t' 'FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
+!/^#/ && NF {
+	if (NF != 6) { print "producers.tsv line " FNR ": expected 6 tab-separated columns"; bad = 1; next }
+	if ($1 !~ /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) { print "producers.tsv line " FNR ": bad repository " $1; bad = 1 }
+	if ($4 != "yes" && $4 != "no") { print "producers.tsv line " FNR ": attested must be yes or no"; bad = 1 }
+	if ($6 != "main" && $6 != "image") { print "producers.tsv line " FNR ": component must be main or image"; bad = 1; next }
 	n = split($3, cs, ",")
-	for (i = 1; i <= n; i++) if (index("," known, "," cs[i] ",") == 0) { print "producers.tsv line " NR ": unknown codename " cs[i]; bad = 1 }
-	if (seen[$1]++) { print "producers.tsv line " NR ": duplicate producer " $1; bad = 1 }
-} END { exit bad }' "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
+	for (i = 1; i <= n; i++) {
+		if (!(cs[i] in comps)) { print "producers.tsv line " FNR ": unknown codename " cs[i]; bad = 1 }
+		else if (index("," comps[cs[i]] ",", "," $6 ",") == 0) { print "producers.tsv line " FNR ": " cs[i] " does not publish component " $6; bad = 1 }
+	}
+	if (seen[$1]++) { print "producers.tsv line " FNR ": duplicate producer " $1; bad = 1 }
+} END { exit bad }' codenames="$APT_CODENAMES_FILE" "$APT_CODENAMES_FILE" "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
 
 # Every workflow that can reach the writer's credentials (the apt-repository
 # environment) queues in the one writer group, keeping up to 100 pending runs

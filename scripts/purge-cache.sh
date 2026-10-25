@@ -20,11 +20,14 @@ fi
 urls=()
 for codename in "$@"; do
 	archs=$(codename_field "$codename" 3) || die "unknown codename $codename"
+	components=$(codename_components "$codename")
 	base="$APT_PUBLIC_URL/dists/$codename"
 	urls+=("$base/InRelease" "$base/Release" "$base/Release.gpg")
-	for arch in ${archs//,/ }; do
-		for f in Packages Packages.gz Packages.bz2 Release; do
-			urls+=("$base/$APT_COMPONENT/binary-$arch/$f")
+	for component in ${components//,/ }; do
+		for arch in ${archs//,/ }; do
+			for f in Packages Packages.gz Packages.bz2 Release; do
+				urls+=("$base/$component/binary-$arch/$f")
+			done
 		done
 	done
 done

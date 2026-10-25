@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Withdraw one package version from a codename: remove it from the working
-# repository, snapshot, and publish, leaving every other package as it is.
+# repository of the component that holds it, snapshot, and publish only that
+# component, leaving every other package and component as it is.
 # The file stays in the pool. Republishing the same release adds it back.
 
 # shellcheck source=lib.sh
@@ -35,16 +36,33 @@ codename_field "$codename" 1 >/dev/null || die "unknown codename $codename"
 
 aptly_init
 reconcile_state "$codename"
-repo=$(ensure_repo "$codename")
 query="$name (= $version)"
 [[ -z $arch ]] || query+=" {$arch}"
-aptly_ repo search "$repo" "$query" >/dev/null 2>&1 || die "$repo has no $query"
+# The component is the one whose working repository holds the query.
+found=()
+for c in $(codename_components "$codename" | tr , ' '); do
+	repo=$(ensure_repo "$codename" "$c")
+	if aptly_ repo search "$repo" "$query" >/dev/null 2>&1; then
+		found+=("$c")
+	fi
+done
+if ((${#found[@]} > 1)); then
+	die "$codename lists $query in more than one component (${found[*]}); one package name belongs in one component, so repair that first"
+fi
+if ((${#found[@]} == 0)); then
+	if [[ $(codename_components "$codename") == main ]]; then
+		die "$(repo_name "$codename" main) has no $query"
+	fi
+	die "$codename has no $query in any component"
+fi
+component=${found[0]}
+repo=$(repo_name "$codename" "$component")
 aptly_ repo remove "$repo" "$query" >&2
-snapshot=$(new_snapshot_name "$codename" "withdraw-$name-$version${arch:+-$arch}")
+snapshot=$(new_snapshot_name "$codename" "$component" "withdraw-$name-$version${arch:+-$arch}")
 aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
-commit_publications "$codename=$snapshot"
+commit_publications "$codename/$component=$snapshot"
 if [[ -z $arch ]]; then
-	verify_published "$codename" "!$name=$version"
+	verify_published "$codename" "!$component/$name=$version"
 else
 	verify_published "$codename"
 fi

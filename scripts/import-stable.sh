@@ -14,6 +14,10 @@
 # identical files are no-ops; changed bytes under a published version are
 # refused. The legacy suite and its pool are only read, never modified.
 #
+# The legacy suite has one component, main, and it is imported into the main
+# component. A codename that also publishes image and is not published yet
+# gets an empty image beside it (core ADR-0059).
+#
 # Prints the manifest SHA256 (step 1) or "CODENAME SNAPSHOT" (step 2).
 
 # shellcheck source=lib.sh
@@ -67,7 +71,7 @@ log "verified $dists/InRelease"
 read -ra suite_archs <<<"$(sed -n 's/^Architectures: //p' "$work/Release")"
 for arch in "${suite_archs[@]}"; do
 	in_csv "$arch" "$archs" || die "$suite publishes $arch, which $codename does not"
-	path="$APT_COMPONENT/binary-$arch/Packages"
+	path="main/binary-$arch/Packages"
 	want=$(release_sha256 "$work/Release" "$path") || die "$dists/Release does not list $path"
 	fetch "$dists/$path" "$work/Packages-$arch"
 	[[ $(sha256sum <"$work/Packages-$arch" | cut -d' ' -f1) == "$want" ]] ||
@@ -111,12 +115,18 @@ fi
 
 aptly_init
 reconcile_state "$codename"
-repo=$(ensure_repo "$codename")
+repo=$(ensure_repo "$codename" main)
 # Only the verified files: the work directory may hold leftovers.
 mapfile -t paths < <(awk -F'\t' -v w="$work" '{ print w "/" $1 }' "$work/manifest.tsv")
 aptly_ repo add "$repo" "${paths[@]}" >&2
-snapshot=$(new_snapshot_name "$codename" "import-$suite")
+snapshot=$(new_snapshot_name "$codename" main "import-$suite")
 aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
-commit_publications "$codename=$snapshot"
+commits=("$codename/main=$snapshot")
+others=$(first_publication_snapshots "$codename" "import-$suite" main)
+if [[ -n $others ]]; then
+	mapfile -t others_list <<<"$others"
+	commits+=("${others_list[@]}")
+fi
+commit_publications "${commits[@]}"
 verify_published "$codename" --deep
 printf '%s %s\n' "$codename" "$snapshot"

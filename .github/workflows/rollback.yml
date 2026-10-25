@@ -1,8 +1,9 @@
-# Point-in-time rollback: publish a codename from an earlier snapshot and
-# rebuild its working repository from it, so later releases build on the
-# rolled-back contents. Everything published to the codename after that
-# snapshot is unpublished (republish a release to roll it forward). To pull
-# a single version, use withdraw.yml. Leave snapshot empty to list snapshots.
+# Point-in-time rollback: publish a codename from earlier snapshots, one for
+# each component it publishes, and rebuild its working repositories from
+# them, so later releases build on the rolled-back contents. Everything
+# published to the codename after those snapshots is unpublished (republish a
+# release to roll it forward). To pull a single version, use withdraw.yml.
+# Leave snapshot empty to list snapshots.
 name: rollback
 
 on:
@@ -13,7 +14,7 @@ on:
         type: choice
         options: [trixie, forky]
       snapshot:
-        description: Snapshot to publish (empty lists snapshots instead)
+        description: Snapshots to publish, one per component, separated by spaces (empty lists snapshots instead)
         required: false
       force:
         description: Recovery only. Overwrite the bucket even if it does not match aptly's database
@@ -59,7 +60,9 @@ jobs:
       - name: Roll back
         if: ${{ inputs.snapshot != '' }}
         run: |
-          args=(--codename "$CODENAME" --snapshot "$SNAPSHOT")
+          args=(--codename "$CODENAME")
+          read -ra names <<<"$SNAPSHOT"
+          for name in "${names[@]}"; do args+=(--snapshot "$name"); done
           if [[ $FORCE == true ]]; then args+=(--force); fi
           scripts/switch.sh "${args[@]}"
 

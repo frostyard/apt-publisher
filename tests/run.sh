@@ -94,11 +94,20 @@ gpg --export "${fprs[0]}" >"$tmp/test-key.gpg"
 gpg --export "${fprs[1]}" >"$tmp/other-key.gpg"
 
 cat >"$tmp/producers.tsv" <<'EOF'
-frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi
-frostyard/bootc-debian	bootc,libostree-*	trixie,forky	no	-
-frostyard/trixie-only	trixie-thing	trixie	no	-
-frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi
+frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
+frostyard/bootc-debian	bootc,libostree-*	trixie,forky	no	-	main
+frostyard/trixie-only	trixie-thing	trixie	no	-	main
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	main
 EOF
+# Producers registered for the image component (core ADR-0059), added to the
+# main ones. Only the component tests use this file.
+cp "$tmp/producers.tsv" "$tmp/producers-image.tsv"
+cat >>"$tmp/producers-image.tsv" <<'EOF'
+frostyard/image-only	imgpkg	trixie,forky	no	-	image
+frostyard/bootc-image	bootc,libostree-1-1	trixie,forky	no	-	image
+EOF
+# Codenames that publish both components. The committed file is main-only.
+printf 'trixie\t13\tamd64,arm64,all\tmain,image\nforky\t14\tamd64,arm64,all\tmain,image\n' >"$tmp/codenames-image.tsv"
 
 # Fail instead of hanging if the local server stalls.
 export RCLONE_TIMEOUT=30s RCLONE_CONTIMEOUT=10s
@@ -165,28 +174,35 @@ make_legacy() {
 		-o "$legacy/dists/stable/InRelease" "$legacy/dists/stable/Release"
 }
 
-# listed CODENAME NAME VERSION [ARCH]: the published indexes on disk list it.
-listed() {
-	awk -v n="$2" -v v="$3" -v a="${4:-}" '
+# listed_in CODENAME COMPONENT NAME VERSION [ARCH]: the published indexes of
+# that component on disk list it.
+listed_in() {
+	awk -v n="$3" -v v="$4" -v a="${5:-}" '
 		BEGIN { RS = ""; FS = "\n" }
 		{
 			delete f
 			for (i = 1; i <= NF; i++) if (match($i, /^[A-Za-z-]+: /)) f[substr($i, 1, RLENGTH - 2)] = substr($i, RLENGTH + 1)
 			if (f["Package"] == n && f["Version"] == v && (a == "" || f["Architecture"] == a)) found = 1
 		}
-		END { exit !found }' "$pub/dists/$1"/main/binary-*/Packages
+		END { exit !found }' "$pub/dists/$1/$2"/binary-*/Packages
 }
+not_listed_in() { ! listed_in "$@"; }
+# listed CODENAME NAME VERSION [ARCH]: the same, for main.
+listed() { listed_in "$1" main "${@:2}"; }
 not_listed() { ! listed "$@"; }
+# index_sum CODENAME COMPONENT: a hash of the component's published indexes.
+index_sum() { cat "$pub/dists/$1/$2"/binary-*/Packages | sha256sum; }
 
-# candidate CODENAME ARCH PACKAGE prints apt's candidate version.
+# candidate CODENAME ARCH PACKAGE [COMPONENTS] prints apt's candidate version;
+# COMPONENTS defaults to main.
 candidate() {
 	local d
 	d=$(mktemp -d "$tmp/apt.XXXXXX")
 	mkdir -p "$d/etc/sources.list.d" "$d/etc/apt.conf.d" "$d/etc/preferences.d" \
 		"$d/state/lists/partial" "$d/cache/archives/partial"
 	: >"$d/state/status"
-	printf 'Types: deb\nURIs: file://%s\nSuites: %s\nComponents: main\nSigned-By: %s\n' \
-		"$pub" "$1" "$tmp/test-key.gpg" >"$d/etc/sources.list.d/test.sources"
+	printf 'Types: deb\nURIs: file://%s\nSuites: %s\nComponents: %s\nSigned-By: %s\n' \
+		"$pub" "$1" "${4:-main}" "$tmp/test-key.gpg" >"$d/etc/sources.list.d/test.sources"
 	local opts=(-o "Dir::Etc=$d/etc" -o Dir::Etc::sourcelist=/dev/null
 		-o "Dir::Etc::sourceparts=$d/etc/sources.list.d" -o "Dir::State=$d/state"
 		-o "Dir::State::status=$d/state/status" -o "Dir::Cache=$d/cache"
@@ -202,7 +218,7 @@ candidate() {
 	}
 	apt-cache "${opts[@]}" policy "$3" | awk '/Candidate:/ { print $2 }'
 }
-candidate_is() { [[ $(candidate "$1" "$2" "$3") == "$4" ]]; }
+candidate_is() { [[ $(candidate "$1" "$2" "$3" "${5:-}") == "$4" ]]; }
 
 inrelease() { sha256sum <"$pub/dists/$1/InRelease"; }
 pool_file() { find "$pub/pool" -name "$1" | head -1; }
@@ -261,6 +277,18 @@ check "dry run routes ~deb13 to trixie" grep -q 'bootc_1.16.8-1~deb13_amd64.deb 
 check "dry run routes ~deb14 to forky" grep -q 'bootc_1.16.8-1~deb14_amd64.deb -> forky' "$tmp/err"
 check "dry run touches no state" test -z "$(ls -A "$tmp/s3/frostyard-apt-state")"
 
+# An image producer cannot publish to a codename that does not publish image,
+# the committed state of every codename until ADR-0059 step 3.
+mkdeb "$tmp/img-refused" imgpkg 1.0 amd64
+must_fail "an image producer is refused, also in a dry run, for a main-only codename" \
+	"trixie does not publish component image" \
+	env APT_PRODUCERS_FILE="$tmp/producers-image.tsv" "$ROOT/scripts/publish.sh" \
+	--producer frostyard/image-only --debs "$tmp/img-refused" --codenames trixie --dry-run
+must_fail "an image producer is refused for a main-only codename" "does not publish component image" \
+	env APT_PRODUCERS_FILE="$tmp/producers-image.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/image-only --debs "$tmp/img-refused"
+check "the refusal touches no state" test -z "$(ls -A "$tmp/s3/frostyard-apt-state")"
+
 # incus-style -debian13- is not a marker, so it goes to every target: why incus
 # is registered for trixie only.
 mkdeb "$tmp/unmarked" bootc '1:1.0-debian13-202610031200' amd64
@@ -318,7 +346,7 @@ must_pass "publish updex 2.0.2" run publish.sh --producer frostyard/updex --debs
 	--label updex-v2.0.2 --report "$tmp/report.tsv"
 cp "$tmp/out" "$tmp/updex.out"
 check "publish reports both codenames" test "$(cut -d' ' -f1 "$tmp/updex.out" | sort | tr '\n' ' ')" = 'forky trixie '
-check "publish writes a report for the canary" grep -qxP 'forky\tfrostyard-updex\t2.0.2\tarm64' "$tmp/report.tsv"
+check "publish writes a report for the canary" grep -qxP 'forky\tfrostyard-updex\t2.0.2\tarm64\tmain' "$tmp/report.tsv"
 check "trixie gains 2.0.2 and keeps the import" listed trixie frostyard-updex 2.0.2
 check "trixie still lists 2.0.1" listed trixie frostyard-updex 2.0.1
 check "forky is first-published with 2.0.2" listed forky frostyard-updex 2.0.2
@@ -513,6 +541,28 @@ check "state history keeps replaced database files" \
 check "purge covers InRelease" grep -qx "$APT_PUBLIC_URL/dists/trixie/InRelease" \
 	<("$ROOT/scripts/purge-cache.sh" --print trixie)
 
+# With the committed configuration every codename publishes main only, exactly
+# as before ADR-0059.
+for codename in trixie forky; do
+	check "$codename Release lists the main component only" grep -qx 'Components: main' "$pub/dists/$codename/Release"
+	check "$codename has no image index" test ! -e "$pub/dists/$codename/image"
+done
+check "the pool has no image directory" test ! -e "$pub/pool/image"
+must_pass "switch --list shows the snapshots" run switch.sh --list
+check "every snapshot keeps the main name pattern" \
+	test "$(grep -oE '\[(trixie|forky)[^]]*\]' "$tmp/out" | grep -Evc '^\[(trixie|forky)-[0-9]{8}T[0-9]{6}Z-')" = 0
+check "no snapshot is named for image" test "$(grep -c 'image' "$tmp/out" || true)" = 0
+check "purge lists no image URL" test "$("$ROOT/scripts/purge-cache.sh" --print trixie | grep -c '/image/' || true)" = 0
+check "purge lists the same 15 URLs as before" test "$("$ROOT/scripts/purge-cache.sh" --print trixie | wc -l)" = 15
+expected=("$APT_PUBLIC_URL/dists/trixie/InRelease" "$APT_PUBLIC_URL/dists/trixie/Release" "$APT_PUBLIC_URL/dists/trixie/Release.gpg")
+for arch in amd64 arm64 all; do
+	for f in Packages Packages.gz Packages.bz2 Release; do
+		expected+=("$APT_PUBLIC_URL/dists/trixie/main/binary-$arch/$f")
+	done
+done
+check "purge lists the same URLs in the same order as before" \
+	test "$("$ROOT/scripts/purge-cache.sh" --print trixie)" = "$(printf '%s\n' "${expected[@]}")"
+
 # --- an older database cannot overwrite newer publications -------------------------------
 
 scope stale
@@ -595,6 +645,259 @@ must_pass "an existing snapshot is found while aptly is still listing" \
 	env PATH="$tmp/shim-aptly:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/updex-trickle" --codenames forky
 check "forky lists the publication" listed forky frostyard-updex 3.3.0
+
+# --- the image component (core ADR-0059) ---------------------------------------
+#
+# From here every codename publishes main and image, and producers may be
+# registered for image. The sections above ran with the committed main-only
+# configuration and prove that path is unchanged.
+
+export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/producers-image.tsv
+# matches REGEX STRING
+matches() { [[ $2 =~ $1 ]]; }
+# state_sum: a hash of every object in the current scope's state path.
+state_sum() { rclone hashsum md5 "r2:frostyard-apt-state/$APT_STATE_PATH" | sort | sha256sum; }
+snapshot_re='[0-9]{8}T[0-9]{6}Z'
+
+scope components
+export SHIM_STATE_PATH=components
+
+mkdeb "$tmp/c-updex" frostyard-updex 1.0 amd64
+must_pass "a first publication by a main producer publishes both components" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/c-updex" --codenames trixie \
+	--label updex-v1.0 --report "$tmp/c-report.tsv"
+main0=$(cut -d' ' -f2 "$tmp/out")
+check "the Release lists both components" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+check "main lists the package" listed_in trixie main frostyard-updex 1.0
+check "image has an index for every architecture" test "$(find "$pub/dists/trixie/image" -mindepth 2 -maxdepth 2 -name Packages | wc -l)" = 3
+check "image starts empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
+check "the main snapshot keeps its name pattern" matches "^trixie-$snapshot_re-updex-v1.0\$" "$main0"
+check "the report row names the component" grep -qxP 'trixie\tfrostyard-updex\t1.0\tamd64\tmain' "$tmp/c-report.tsv"
+must_pass "switch --list shows the image snapshot and no pending marker" run switch.sh --list
+check "the empty image snapshot is named for image" grep -Eq "\[trixie-image-$snapshot_re-updex-v1.0\]" "$tmp/out"
+check "no pending marker is left" test "$(grep -c '^pending:' "$tmp/out" || true)" = 0
+must_pass "the canary reads the main component" run apt-canary.sh --report "$tmp/c-report.tsv"
+must_pass "a both-component suite passes the deep check" run verify.sh trixie --deep frostyard-updex=1.0
+
+# An image publication.
+mkdeb "$tmp/c-img" imgpkg 1.0 amd64
+main_sum=$(index_sum trixie main)
+must_pass "publish an image package" run publish.sh --producer frostyard/image-only --debs "$tmp/c-img" \
+	--codenames trixie --label imgpkg-1.0 --report "$tmp/c-img-report.tsv"
+image1=$(cut -d' ' -f2 "$tmp/out")
+check "the route names the component" grep -q 'imgpkg_1.0_amd64.deb -> trixie/image' "$tmp/err"
+check "the image snapshot is named for image" matches "^trixie-image-$snapshot_re-imgpkg-1.0\$" "$image1"
+check "image lists the package" listed_in trixie image imgpkg 1.0
+check "main does not list it" not_listed_in trixie main imgpkg 1.0
+check "the file is in pool/image" test -n "$(find "$pub/pool/image" -name 'imgpkg_1.0_amd64.deb' 2>/dev/null)"
+check "the file is not in pool/main" test -z "$(find "$pub/pool/main" -name 'imgpkg_1.0_amd64.deb')"
+check "apt with Components: image sees it" candidate_is trixie amd64 imgpkg 1.0 image
+check "apt with Components: main has no candidate" candidate_is trixie amd64 imgpkg '' main
+check "apt with both components sees it" candidate_is trixie amd64 imgpkg 1.0 'main image'
+check "an image publication leaves the main indexes byte-identical" test "$(index_sum trixie main)" = "$main_sum"
+check "the report row names image" grep -qxP 'trixie\timgpkg\t1.0\tamd64\timage' "$tmp/c-img-report.tsv"
+must_pass "the canary reads the image component" run apt-canary.sh --report "$tmp/c-img-report.tsv"
+must_pass "the canary takes CODENAME/COMPONENT" run apt-canary.sh trixie/image amd64 imgpkg=1.0
+must_fail "the canary finds no image package in main" "apt-get download imgpkg=1.0" \
+	run apt-canary.sh trixie amd64 imgpkg=1.0
+must_pass "verify accepts image/NAME=VERSION" run verify.sh trixie image/imgpkg=1.0
+must_fail "verify rejects main/NAME=VERSION" "does not list imgpkg 1.0 in main" run verify.sh trixie main/imgpkg=1.0
+must_pass "verify accepts !main/NAME=VERSION" run verify.sh trixie '!main/imgpkg=1.0'
+must_fail "verify rejects !image/NAME=VERSION" "still lists imgpkg 1.0 in image" run verify.sh trixie '!image/imgpkg=1.0'
+must_pass "a bare NAME=VERSION matches any component" run verify.sh trixie --deep imgpkg=1.0 frostyard-updex=1.0
+
+# A main publication leaves image alone.
+image_sum=$(index_sum trixie image)
+mkdeb "$tmp/c-thing" trixie-thing 1.0 amd64
+must_pass "publish a main package" run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing"
+main1=$(cut -d' ' -f2 "$tmp/out")
+check "a main publication lists the package in main" listed_in trixie main trixie-thing 1.0
+check "a main publication leaves the image indexes byte-identical" test "$(index_sum trixie image)" = "$image_sum"
+
+# One package name belongs in one component.
+mkdeb "$tmp/c-bootc-img" bootc '1.0-1~deb13' amd64
+must_pass "publish bootc to image" run publish.sh --producer frostyard/bootc-image --debs "$tmp/c-bootc-img"
+mkdeb "$tmp/c-bootc-main" bootc '1.1-1~deb13' amd64
+before=$(inrelease trixie)
+must_fail "main cannot publish a name that image has" "trixie already publishes bootc in component image" \
+	run publish.sh --producer frostyard/bootc-debian --debs "$tmp/c-bootc-main"
+check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+mkdeb "$tmp/c-ostree-main" libostree-1-1 '1.0-1~deb13' amd64
+must_pass "publish libostree-1-1 to main" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/c-ostree-main"
+mkdeb "$tmp/c-ostree-img" libostree-1-1 '1.1-1~deb13' amd64
+before=$(inrelease trixie)
+must_fail "image cannot publish a name that main has" "trixie already publishes libostree-1-1 in component main" \
+	run publish.sh --producer frostyard/bootc-image --debs "$tmp/c-ostree-img"
+check "that refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "image still lacks libostree-1-1" not_listed_in trixie image libostree-1-1 '1.1-1~deb13'
+
+# An image publication interrupted after it became visible is completed by the
+# next run, whichever producer it is.
+rm -f -- "$tmp/shim-rclone/count"
+export SHIM_FAIL_AT=2
+mkdeb "$tmp/c-img2" imgpkg 2.0 amd64
+must_fail "an image switch interrupted after it became visible fails" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/image-only --debs "$tmp/c-img2" --codenames trixie
+check "the interrupted image publication is visible" listed_in trixie image imgpkg 2.0
+must_pass "the pending marker names its component" run switch.sh --list
+check "only the image marker is pending" test "$(grep '^pending:' "$tmp/out" | sed -E 's/ -> .*//')" = 'pending: trixie/image'
+check "the marker names the image snapshot" \
+	grep -Eq "^pending: trixie/image -> trixie-image-$snapshot_re-image-only\$" "$tmp/out"
+mkdeb "$tmp/c-thing2" trixie-thing 1.1 amd64
+must_pass "a main producer's run completes it and publishes" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing2"
+check "that run reported the completion" grep -q 'completing the interrupted publication of trixie' "$tmp/err"
+check "the image release stays published" listed_in trixie image imgpkg 2.0
+check "the main release is published" listed_in trixie main trixie-thing 1.1
+must_pass "the completed suite verifies" run verify.sh trixie --deep image/imgpkg=2.0 main/trixie-thing=1.1
+
+# Withdraw touches one component.
+main_sum=$(index_sum trixie main)
+must_pass "withdraw an image package" run withdraw.sh --codename trixie --package imgpkg --version 2.0
+image4=$(cut -d' ' -f2 "$tmp/out")
+check "the withdrawal snapshot is named for image" matches "^trixie-image-$snapshot_re-withdraw-imgpkg-2.0\$" "$image4"
+check "image no longer lists the version" not_listed_in trixie image imgpkg 2.0
+check "image keeps its other versions" listed_in trixie image imgpkg 1.0
+check "withdrawing from image leaves the main indexes byte-identical" test "$(index_sum trixie main)" = "$main_sum"
+must_fail "withdrawing an unlisted version is refused in every component" "has no" \
+	run withdraw.sh --codename trixie --package imgpkg --version 9.9
+image_sum=$(index_sum trixie image)
+must_pass "withdraw a main package" run withdraw.sh --codename trixie --package trixie-thing --version 1.1
+check "withdrawing from main leaves the image indexes byte-identical" test "$(index_sum trixie image)" = "$image_sum"
+check "main no longer lists the version" not_listed_in trixie main trixie-thing 1.1
+
+# Rollback names one snapshot per component.
+before=$(inrelease trixie)
+must_fail "rollback with only a main snapshot is refused" "give a snapshot for component image too" \
+	run switch.sh --codename trixie --snapshot "$main0"
+must_fail "rollback with only an image snapshot is refused" "give a snapshot for component main too" \
+	run switch.sh --codename trixie --snapshot "$image1"
+must_fail "rollback with two snapshots of one component is refused" "two snapshots" \
+	run switch.sh --codename trixie --snapshot "$main0" --snapshot "$main1" --snapshot "$image1"
+must_fail "rollback refuses another codename's main snapshot" "was not created for trixie" \
+	run switch.sh --codename trixie --snapshot forky-20260101T000000Z-x --snapshot "$image1"
+must_fail "rollback refuses another codename's image snapshot" "was not created for trixie" \
+	run switch.sh --codename trixie --snapshot "$main0" --snapshot forky-image-20260101T000000Z-x
+must_fail "rollback refuses a snapshot that does not exist" "no snapshot named" \
+	run switch.sh --codename trixie --snapshot trixie-20200101T000000Z-nope --snapshot "$image1"
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_pass "roll back with both snapshots, in either order" \
+	run switch.sh --codename trixie --snapshot "$image1" --snapshot "$main0"
+check "rollback restores image" listed_in trixie image imgpkg 1.0
+check "rollback unpublishes later image packages" not_listed_in trixie image bootc '1.0-1~deb13'
+check "rollback restores main" not_listed_in trixie main trixie-thing 1.0
+check "rollback unpublishes later main packages" not_listed_in trixie main libostree-1-1 '1.0-1~deb13'
+check "rollback deletes no pool files" test -n "$(find "$pub/pool/image" -name 'imgpkg_2.0_amd64.deb')"
+mkdeb "$tmp/c-thing3" trixie-thing 1.2 amd64
+must_pass "a later main publication builds on the rolled-back contents" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing3"
+cur_main=$(cut -d' ' -f2 "$tmp/out")
+cur_image=$image1
+check "the rollback survives a later publication" not_listed_in trixie main libostree-1-1 '1.0-1~deb13'
+check "the later publication is listed" listed_in trixie main trixie-thing 1.2
+
+# A tampered image index.
+{
+	rclone cat "r2:frostyardrepo/$APT_PREFIX/dists/trixie/image/binary-amd64/Packages"
+	printf '\nPackage: injected\nVersion: 1\nArchitecture: amd64\nFilename: pool/image/i/injected/injected_1_amd64.deb\nSHA256: %064d\n\n' 0
+} >"$tmp/injected-image"
+rclone rcat "r2:frostyardrepo/$APT_PREFIX/dists/trixie/image/binary-amd64/Packages" <"$tmp/injected-image"
+before=$(inrelease trixie)
+must_fail "verify rejects a tampered image index" "image/binary-amd64/Packages does not match its Release hash" \
+	run verify.sh trixie
+mkdeb "$tmp/c-thing4" trixie-thing 1.3 amd64
+must_fail "a tampered image index blocks publication" "does not match aptly's database" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing4"
+check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_pass "switch --force with both snapshots repairs the image index" \
+	run switch.sh --codename trixie --snapshot "$cur_main" --snapshot "$cur_image" --force
+must_pass "the repaired suite verifies" run verify.sh trixie --deep
+must_pass "publication resumes after the repair" run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing4"
+check "the resumed publication is listed" listed_in trixie main trixie-thing 1.3
+cur_main=$(cut -d' ' -f2 "$tmp/out")
+
+# A Release that lists other components than the configuration.
+rclone cat "r2:frostyardrepo/$APT_PREFIX/dists/trixie/Release" | sed 's/^Components: .*/Components: main/' |
+	rclone rcat "r2:frostyardrepo/$APT_PREFIX/dists/trixie/Release"
+mkdeb "$tmp/c-thing5" trixie-thing 1.4 amd64
+must_fail "a Release with the wrong components blocks publication" \
+	"Release lists the components main, but the configuration says image,main" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/c-thing5"
+must_pass "switch --force repairs the Release" \
+	run switch.sh --codename trixie --snapshot "$cur_main" --snapshot "$cur_image" --force
+check "the Release lists both components again" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+
+# purge covers every component's indexes; main's URLs come first, unchanged.
+"$ROOT/scripts/purge-cache.sh" --print trixie >"$tmp/purge.txt"
+check "purge lists 27 URLs for two components" test "$(wc -l <"$tmp/purge.txt")" = 27
+for arch in amd64 arm64 all; do
+	for f in Packages Packages.gz Packages.bz2 Release; do
+		check "purge lists image/binary-$arch/$f" grep -qx "$APT_PUBLIC_URL/dists/trixie/image/binary-$arch/$f" "$tmp/purge.txt"
+	done
+done
+check "purge lists main first" test "$(sed -n 4p "$tmp/purge.txt")" = "$APT_PUBLIC_URL/dists/trixie/main/binary-amd64/Packages"
+
+# A bucket that publishes main only, while the configuration says main,image,
+# is refused before any change.
+scope mainbucket
+mkdeb "$tmp/mb-updex" frostyard-updex 1.0 amd64
+must_pass "publish to a main-only codename" \
+	env APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/mb-updex" --codenames trixie
+before=$(inrelease trixie)
+state_before=$(state_sum)
+mkdeb "$tmp/mb-updex2" frostyard-updex 1.1 amd64
+must_fail "a main-only bucket is refused for a main producer" "ADR-0059" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/mb-updex2" --codenames trixie
+check "the refusal names the published and configured components" grep -q 'components main, but the configuration says image,main' "$tmp/err"
+must_fail "a main-only bucket is refused for an image producer" "ADR-0059" \
+	run publish.sh --producer frostyard/image-only --debs "$tmp/c-img" --codenames trixie
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+
+# An image producer's first publication also publishes main, empty.
+scope auditimg
+export APT_PRODUCERS_FILE=$tmp/producers-audit.tsv
+cat >"$APT_PRODUCERS_FILE" <<'EOF'
+frostyard/updex	frostyard-updex	trixie,forky	yes	-	main
+frostyard/image-only	imgpkg	trixie,forky	no	-	image
+EOF
+mkdeb "$tmp/a-img" imgpkg 1.0 amd64
+must_pass "an image producer's first publication succeeds" \
+	run publish.sh --producer frostyard/image-only --debs "$tmp/a-img"
+for codename in trixie forky; do
+	check "$codename lists both components" grep -qx 'Components: image main' "$pub/dists/$codename/Release"
+	check "$codename lists the image package" listed_in "$codename" image imgpkg 1.0
+	check "$codename main starts empty" test "$(cat "$pub/dists/$codename"/main/binary-*/Packages | wc -c)" = 0
+done
+mkdeb "$tmp/a-updex" frostyard-updex 3.1.0 amd64
+must_pass "a main producer publishes beside it" run publish.sh --producer frostyard/updex --debs "$tmp/a-updex"
+check "main lists the package" listed_in forky main frostyard-updex 3.1.0
+check "image still lists its package" listed_in forky image imgpkg 1.0
+
+# The audit reads each producer's own component.
+release frostyard_updex v3.1.0 frostyard-updex_3.1.0_amd64.deb
+release frostyard_image-only v1.0 imgpkg_1.0_amd64.deb
+must_pass "the audit finds an image producer's release in image" \
+	env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh"
+release frostyard_image-only v1.1 imgpkg_1.1_amd64.deb
+if env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the audit reports an image release that is absent (unexpectedly passed)"
+fi
+check "the audit reports an image release that is absent" \
+	grep -qx 'MISSING frostyard/image-only v1.1 imgpkg_1.1_amd64.deb' "$tmp/out"
+# A package published to main does not satisfy an image registration.
+release frostyard_image-only v1.2 frostyard-updex_3.1.0_amd64.deb
+if env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the audit does not look in main for an image producer (unexpectedly passed)"
+fi
+check "the audit does not look in main for an image producer" \
+	grep -qx 'MISSING frostyard/image-only v1.2 frostyard-updex_3.1.0_amd64.deb' "$tmp/out"
+
+# Back to the committed configuration for the checks that follow.
+unset APT_CODENAMES_FILE
+export APT_PRODUCERS_FILE=$tmp/producers.tsv
 
 # --- secrets check ------------------------------------------------------------
 

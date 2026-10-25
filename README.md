@@ -50,6 +50,7 @@ Bucket layout (`frostyardrepo`):
 debian/dists/trixie/   signed InRelease, by-hash indexes, amd64 arm64 all
 debian/dists/forky/
 debian/pool/main/...   one pool shared by every codename
+debian/pool/image/...  the image component's files, once a codename publishes it
 dists/stable/, pool/   repogen's legacy suite: read by the import, never written
 ```
 
@@ -59,20 +60,22 @@ Each run restores it, as on a fresh runner, and saves it back:
 - `db/`: aptly's database. Replaced files are kept under `history/`.
 - `pool/`: aptly's package pool, append-only.
 - `txn/`: pending markers recording the snapshot a publication was about to
-  make visible.
+  make visible, one per component (`pending-trixie`, `pending-trixie-image`).
 
 ### Keeping state and bucket in step
 
 Before changing a codename, every script compares the packages the bucket
-lists with aptly's database. It compares package sets because `Release`
-changes on every publication.
+lists with aptly's database, for every component the codename publishes. It
+compares package sets because `Release` changes on every publication. The
+bucket's `Release` must also list exactly the configured components.
 
-- **The bucket matches the published snapshot:** the state is current.
-- **The bucket matches the pending snapshot:** an earlier run published but
-  died before saving, and the publication is completed. A retry, or any
-  other producer's run, converges.
-- **Anything else is refused:** lost state, an older database, or another
-  writer's change. Inspect it, then recover with `switch.sh --force`, which
+- **Every component matches its published snapshot:** the state is current.
+- **Every component matches its published or its pending snapshot:** an
+  earlier run published but died before saving, and the publication is
+  completed. A retry, or any other producer's run, converges.
+- **Anything else is refused:** lost state, an older database, another
+  writer's change, or a bucket that serves other components than the
+  configuration. Inspect it, then recover with `switch.sh --force`, which
   also re-uploads pool files whose bucket copy is corrupted.
 
 ### What the publisher refuses
@@ -84,23 +87,27 @@ Each of these is covered by `tests/run.sh`:
   publish `bootc`;
 - codenames the producer isn't allowed, and architectures the codename
   doesn't publish;
+- a producer registered for a component (`image`) that the codename doesn't
+  publish (see [Components](#components));
+- a package name that the codename already publishes in the other component;
 - a `~deb14` build targeted at trixie (see [Codenames](#codenames-and-versions));
 - a name/version/arch that is already published with different bytes;
 - publishing when the bucket doesn't match aptly's database: lost or older
-  state, a tampered index, another writer;
+  state, a tampered index, another writer, or a different set of components;
 - importing anything outside the reviewed, verified manifest;
 - deleting pool files: every switch uses `-skip-cleanup`, so rollbacks and
   withdrawals leave files in place.
 
 Every publish is read back from the bucket:
 
-- the InRelease signature against `keys/frostyard.gpg`;
-- each `Packages` hash against `Release`;
-- each expected `name=version`, with its file downloaded and checked
-  against its SHA256.
+- the InRelease signature against `keys/frostyard.gpg`, and its
+  `Components:` against the configuration;
+- each component's `Packages` hash against `Release`;
+- each expected `component/name=version`, with its file downloaded and
+  checked against its SHA256.
 
-Rollbacks and imports also run the deep check: every file the codename lists
-must be in the bucket with the index's MD5. Finally, the canary installs the
+Rollbacks and imports also run the deep check: every file the codename lists,
+in every component, must be in the bucket with the index's MD5. Finally, the canary installs the
 new packages with apt through the public URL.
 
 ## Producer integration
@@ -130,10 +137,10 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
 
 ## Codenames and versions
 
-| Codename | Debian | Architectures |
-| --- | --- | --- |
-| trixie | 13 | amd64, arm64, all |
-| forky | 14 | amd64, arm64, all |
+| Codename | Debian | Architectures | Components |
+| --- | --- | --- | --- |
+| trixie | 13 | amd64, arm64, all | main |
+| forky | 14 | amd64, arm64, all | main |
 
 - **Statically linked packages** (updex, `CGO_ENABLED=0`) use plain versions.
   The same file goes into every target codename and is stored once.
@@ -150,6 +157,39 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
     (`1:7.5.1-debian13-202610031200`) carry `-debian13-`, which is not a
     marker, so it is registered for `trixie` only until they carry `~deb13`
     or `~deb14`.
+
+## Components
+
+A codename can publish two components, under one signed `Release`
+([ADR-0059](https://github.com/frostyard/core/blob/main/docs/adr/0059-publish-image-only-packages-in-a-separate-apt-component.md)):
+
+- `main`: packages for any Debian host.
+- `image`: builds that Frostyard images need instead of Debian's packages of
+  the same name.
+
+How it works:
+
+- `config/codenames.tsv` column 4, `components`, lists what a codename
+  publishes: `main` or `main,image`.
+- `config/producers.tsv` column 6, `component`, says where a producer's
+  packages go: `main` or `image`. The producer must be registered only for
+  codenames that publish that component.
+- **One component per name:** a codename publishes a package name in one
+  component only. A publication of a name that the codename already has in
+  the other component is refused.
+- Each component has its own working repository (`frostyard-trixie`,
+  `frostyard-trixie-image`), snapshots (`trixie-TIME-LABEL`,
+  `trixie-image-TIME-LABEL`), pending marker and pool path.
+- A first publication of a codename publishes every configured component;
+  the ones without packages start empty.
+- A publication switches only its producer's component, in one `Release`.
+- A rollback needs one snapshot for each component.
+
+No codename publishes `image` yet, and every producer is `main`. A later
+change adds `image` to `trixie` and `forky`; it needs a migration of the
+published codenames, which this repository does not do yet: `publish switch`
+cannot add a component, and a bucket that serves other components than the
+configuration is refused.
 
 Clients:
 
@@ -214,31 +254,35 @@ keyrings keep working.
 
 - **Withdraw one version:** run **withdraw** with a codename, package and
   version, plus an architecture if needed.
-  - It removes that version from the working repository and publishes a new
-    snapshot; everything else stays published.
+  - It removes that version from the working repository of the component
+    that holds it and publishes a new snapshot of that component; everything
+    else stays published.
   - The file stays in the pool, and republishing the release brings the
     version back.
   - The audit reports a withdrawn latest release as missing. That's
     expected, and the audit never republishes.
-- **Point-in-time rollback:** run **rollback** with a codename and an
-  earlier snapshot.
-  - It publishes that snapshot and rebuilds the working repository from it,
-    so later releases build on the rolled-back contents.
-  - Everything published to that codename after the snapshot is unpublished,
-    including other producers' packages. Republish a release to roll it
-    forward.
+- **Point-in-time rollback:** run **rollback** with a codename and earlier
+  snapshots, one for each component the codename publishes, separated by
+  spaces. A codename that publishes only `main` takes one.
+  - It publishes those snapshots and rebuilds the working repositories from
+    them, so later releases build on the rolled-back contents.
+  - Everything published to that codename after the snapshots is
+    unpublished, including other producers' packages. Republish a release to
+    roll it forward.
   - With the snapshot left empty, it lists snapshots, publications and
     pending markers instead.
 - **Recovery:** when a run refuses because the bucket doesn't match aptly's
   database, inspect what changed first.
-  - Then run **rollback** with `force` and the snapshot the bucket should
+  - Then run **rollback** with `force` and the snapshots the bucket should
     serve.
   - This republishes it regardless of the mismatch and re-uploads any pool
     file whose bucket copy differs.
 - **Health check** (needs R2 credentials):
-  `scripts/verify.sh trixie --deep frostyard-updex=2.0.2`.
+  `scripts/verify.sh trixie --deep frostyard-updex=2.0.2`. A spec can name a
+  component, `image/NAME=VERSION`, and `!` asks for absence.
 - **Install check** through the public URL:
-  `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`.
+  `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`; use
+  `trixie/image` for the image component.
 - **Missed releases:** `scripts/audit-producers.sh`, run nightly by
   **audit**.
 - **Secrets:** run **check-secrets** after setting or rotating one.
