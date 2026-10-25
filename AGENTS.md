@@ -23,6 +23,10 @@ the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision.
 - A codename publishes the components in `config/codenames.tsv` (`main`, or
   `main,image`; core ADR-0059). A package name lives in one component per
   codename: `publish.sh` refuses a name that the other component already has.
+- A published codename that lacks a configured component gets it, empty,
+  from the next publication run (`publish source add` + `publish update`, one
+  signed `Release`), also from a publish run that does not target it.
+  `publish switch` cannot add a component; removing one is refused.
 - `main` keeps its names: repository `frostyard-<codename>`, snapshot
   `<codename>-<time>-<label>`, marker `txn/pending-<codename>`, and the same
   aptly commands. Only `image` adds `-image` to them. Do not change the

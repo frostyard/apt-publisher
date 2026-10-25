@@ -67,7 +67,9 @@ Each run restores it, as on a fresh runner, and saves it back:
 Before changing a codename, every script compares the packages the bucket
 lists with aptly's database, for every component the codename publishes. It
 compares package sets because `Release` changes on every publication. The
-bucket's `Release` must also list exactly the configured components.
+bucket's `Release` must also list exactly the configured components, or,
+while a configured component is being added, exactly the components aptly's
+database publishes.
 
 - **Every component matches its published snapshot:** the state is current.
 - **Every component matches its published or its pending snapshot:** an
@@ -139,8 +141,8 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
 
 | Codename | Debian | Architectures | Components |
 | --- | --- | --- | --- |
-| trixie | 13 | amd64, arm64, all | main |
-| forky | 14 | amd64, arm64, all | main |
+| trixie | 13 | amd64, arm64, all | main, image |
+| forky | 14 | amd64, arm64, all | main, image |
 
 - **Statically linked packages** (updex, `CGO_ENABLED=0`) use plain versions.
   The same file goes into every target codename and is stored once.
@@ -183,13 +185,20 @@ How it works:
 - A first publication of a codename publishes every configured component;
   the ones without packages start empty.
 - A publication switches only its producer's component, in one `Release`.
-- A rollback needs one snapshot for each component.
+- A rollback takes one snapshot per component; a component the codename does
+  not publish yet is added empty.
 
-No codename publishes `image` yet, and every producer is `main`. A later
-change adds `image` to `trixie` and `forky`; it needs a migration of the
-published codenames, which this repository does not do yet: `publish switch`
-cannot add a component, and a bucket that serves other components than the
-configuration is refused.
+`trixie` and `forky` publish `main,image`. Every producer is still `main`,
+and no producer moves in this change: ADR-0059 step 5 moves bootc-debian and
+incus to `image` later, with a move workflow.
+
+The live codenames published `main` only. The first publication run after
+this change adds each missing configured component to them, empty: it writes
+it with `publish source add` and `publish update`, in one signed `Release`.
+That run can be a publication, a withdrawal, a rollback or an import, and a
+publication also adds the component to the codenames it does not target.
+Later runs switch as before. `publish switch` cannot add a component, and a
+configuration that removes a component from a published codename is refused.
 
 Clients:
 
