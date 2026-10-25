@@ -15,8 +15,9 @@
 # refused. The legacy suite and its pool are only read, never modified.
 #
 # The legacy suite has one component, main, and it is imported into the main
-# component. A codename that also publishes image and is not published yet
-# gets an empty image beside it (core ADR-0059).
+# component. A codename that also publishes image gets a snapshot of it too,
+# empty when it has no packages, also when the codename is already published
+# without it (core ADR-0059: `publish switch` cannot add a component).
 #
 # Prints the manifest SHA256 (step 1) or "CODENAME SNAPSHOT" (step 2).
 
@@ -124,7 +125,7 @@ aptly_ repo add "$repo" "${paths[@]}" >&2
 snapshot=$(new_snapshot_name "$codename" main "import-$suite")
 aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
 commits=("$codename/main=$snapshot")
-others=$(first_publication_snapshots "$codename" "import-$suite" main)
+others=$(missing_component_snapshots "$codename" "import-$suite" main)
 if [[ -n $others ]]; then
 	mapfile -t others_list <<<"$others"
 	commits+=("${others_list[@]}")

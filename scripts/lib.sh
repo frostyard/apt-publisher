@@ -58,7 +58,11 @@ codename_for_major() {
 #
 # A codename publishes the components in column 4 of config/codenames.tsv:
 # main, or main,image. Each component has its own working repository,
-# snapshots, pending marker and pool path.
+# snapshots, pending marker and pool path. aptly publishes them under one
+# signed Release. `aptly publish switch` cannot add a component to a published
+# codename, so a configured component the codename lacks is added with
+# `publish source add` and `publish update` (publish_snapshot); removing one
+# is refused.
 
 # Every component the publisher knows; used to clear markers whatever the
 # configuration says.
@@ -231,7 +235,8 @@ ensure_repo() {
 	local repo
 	repo=$(repo_name "$1" "$2")
 	if ! aptly_ repo show "$repo" >/dev/null 2>&1; then
-		aptly_ repo create -distribution="$1" -component="$2" "$repo" >/dev/null
+		aptly_ repo create -distribution="$1" -component="$2" "$repo" >/dev/null ||
+			die "cannot create the aptly repository $repo"
 	fi
 	printf '%s\n' "$repo"
 }
@@ -264,24 +269,33 @@ new_snapshot_name() {
 	printf '%s\n' "$name"
 }
 
-# first_publication_snapshots CODENAME LABEL COMPONENT... prints
+# missing_component_snapshots CODENAME LABEL COMPONENT... prints
 # "CODENAME/COMPONENT=SNAPSHOT" for every configured component that is not
-# among the COMPONENTs, when aptly does not publish CODENAME yet: the first
-# publication needs a snapshot of every component. Each snapshot is taken
-# from the component's working repository, which may be empty.
-first_publication_snapshots() {
-	local codename=$1 label=$2 c repo snapshot
+# among the COMPONENTs and that aptly does not publish for CODENAME: a first
+# publication needs a snapshot of every component, and a published codename
+# that lacks a configured component gets it empty from the next run, because
+# `publish switch` cannot add one. When aptly does not publish CODENAME at
+# all, that is every such component; otherwise it is each configured
+# component missing from the published ones. Each snapshot is taken from the
+# component's working repository, which may be empty. With a main-only
+# configuration and publication it prints nothing and changes nothing.
+missing_component_snapshots() {
+	local codename=$1 label=$2 c repo snapshot published
 	local -a absent=()
 	shift 2
+	# Callers run this inside $(...), where errexit is off: every failure
+	# returns explicitly, so a failed query never reads as "nothing published".
+	published=$(published_components "$codename") || return 1
 	for c in $(codename_components "$codename" | tr , ' '); do
-		in_csv "$c" "$(IFS=,; printf '%s' "$*")" || absent+=("$c")
+		in_csv "$c" "$(IFS=,; printf '%s' "$*")" && continue
+		in_csv "$c" "$published" && continue
+		absent+=("$c")
 	done
 	((${#absent[@]})) || return 0
-	[[ -z $(published_components "$codename") ]] || return 0
 	for c in "${absent[@]}"; do
-		repo=$(ensure_repo "$codename" "$c")
-		snapshot=$(new_snapshot_name "$codename" "$c" "$label")
-		aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
+		repo=$(ensure_repo "$codename" "$c") || return 1
+		snapshot=$(new_snapshot_name "$codename" "$c" "$label") || return 1
+		aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null || return 1
 		printf '%s/%s=%s\n' "$codename" "$c" "$snapshot"
 	done
 }
@@ -393,17 +407,23 @@ bucket_set() {
 # reconcile_state CODENAME runs before any change to CODENAME. It proves
 # that aptly's database describes what the bucket serves, comparing package
 # sets because a Release file changes on every publication. The bucket must
-# serve exactly the configured components, and for each of them:
+# serve exactly the components aptly's database publishes, and, when that
+# database publishes nothing, exactly the configured components. For each
+# component it proves that aptly publishes, in the configured order:
 #   - every component lists exactly its published snapshot: current; pending
 #     markers left by a run that failed before becoming visible are dropped;
 #   - else, with a marker present, every component lists its published or
 #     its pending snapshot: a run published them but failed before saving,
-#     so the pending snapshots are published again to complete it;
+#     so the pending snapshots are published again to complete it (this also
+#     completes an interrupted addition of a component);
 #   - anything else (lost, older or foreign state) is refused.
+# A published codename that lacks a configured component is on its way to
+# publishing it: the caller adds it empty. A configuration that would remove
+# a component from a published codename is refused.
 reconcile_state() {
 	local codename=$1 configured published_set published pending bucket c
 	local release have all_current=1 completable=1 markers=0 pubs='' pends=''
-	local -a comps=() specs=() names=()
+	local -a comps=() covered=() specs=() names=()
 	local -A pend=()
 	configured=$(component_set "$(codename_components "$codename")")
 	published_set=$(published_components "$codename")
@@ -417,24 +437,32 @@ reconcile_state() {
 		return 0
 	fi
 	if [[ -n $published_set && $published_set != "$configured" ]]; then
-		die "aptly's database publishes $codename with the components $published_set, but the configuration says $configured (core ADR-0059). Changing the components of a published codename is a separate migration; nothing was changed"
+		for c in ${published_set//,/ }; do
+			in_csv "$c" "$configured" ||
+				die "aptly's database publishes $codename with the components $published_set, but the configuration says $configured (core ADR-0059). Removing a component is a separate migration; nothing was changed"
+		done
+		log "aptly publishes $codename with $published_set; the configuration adds the rest, and this run adds them"
 	fi
 	release=$(mktemp)
 	rclone cat "r2:$APT_BUCKET/$APT_PREFIX/dists/$codename/Release" >"$release" ||
 		die "cannot read the published $codename Release"
 	have=$(release_components "$release")
 	rm -f -- "$release"
-	[[ $have == "$configured" ]] ||
+	if [[ $have != "$configured" && (-z $published_set || $have != "$published_set") ]]; then
 		die "the bucket's $APT_PREFIX/dists/$codename does not match aptly's database: its Release lists the components ${have:-none}, but the configuration says $configured. Inspect it, then recover with switch.sh --force"
+	fi
 	IFS=, read -ra comps <<<"$(codename_components "$codename")"
 	for c in "${comps[@]}"; do
+		in_csv "$c" "$have" && covered+=("$c")
+	done
+	for c in "${covered[@]}"; do
 		published=$(published_snapshot "$codename" "$c")
 		pending=$(pending_snapshot "$codename" "$c")
 		if [[ -f $(pending_file "$codename" "$c") ]]; then
 			markers=1
 		fi
 		pend[$c]=$pending
-		if ((${#comps[@]} > 1)); then
+		if ((${#covered[@]} > 1)); then
 			pubs+="${pubs:+, }$c=${published:-none}"
 			pends+="${pends:+, }$c=${pending:-none}"
 		else
@@ -455,7 +483,7 @@ reconcile_state() {
 		return 0
 	fi
 	if ((markers && completable)); then
-		for c in "${comps[@]}"; do
+		for c in "${covered[@]}"; do
 			if [[ -n ${pend[$c]} ]]; then
 				specs+=("$c=${pend[$c]}")
 				names+=("${pend[$c]}")
@@ -475,15 +503,20 @@ reconcile_state() {
 force_overwrite=0
 
 # publish_snapshot CODENAME COMPONENT=SNAPSHOT... points the listed
-# components of CODENAME at their snapshots: one atomic switch when aptly
-# already publishes the codename (components not listed stay as they are),
-# otherwise a first publication, which needs a snapshot for every configured
-# component. Pool files are never deleted (-skip-cleanup). Callers
-# reconcile first.
+# components of CODENAME at their snapshots, in one signed Release; components
+# not listed stay as they are. When aptly already publishes the codename and
+# every listed component, that is one atomic switch. Otherwise the listed
+# components are staged first: the ones aptly does not publish yet are added
+# (`publish source add`, which `publish switch` cannot do) and the published
+# ones are updated, then one `publish update` writes the Release. A codename
+# aptly does not publish at all gets a first publication, which needs a
+# snapshot for every configured component. Pool files are never deleted
+# (-skip-cleanup). Callers reconcile first.
 publish_snapshot() {
-	local codename=$1 pair c i found csv
+	local codename=$1 pair c i found csv published csv_added csv_present out
 	shift
 	local -a comps=() snaps=() ordered=() configured=()
+	local -a absent=() absent_snaps=() there=() there_snaps=()
 	local -A seen=()
 	IFS=, read -ra configured <<<"$(codename_components "$codename")"
 	for pair in "$@"; do
@@ -501,28 +534,58 @@ publish_snapshot() {
 	if ((force_overwrite)); then
 		extra+=(-force-overwrite)
 	fi
-	if [[ -n $(published_components "$codename") ]]; then
-		csv=$(IFS=,; printf '%s' "${comps[*]}")
-		log "switching $codename to ${snaps[*]}"
-		aptly_ publish switch "${common[@]}" "-component=$csv" "${extra[@]}" -skip-cleanup \
-			"$codename" "$APT_TARGET" "${snaps[@]}" >&2
-	else
-		for c in "${configured[@]}"; do
-			found=''
-			for i in "${!comps[@]}"; do
-				if [[ ${comps[i]} == "$c" ]]; then found=${snaps[i]}; fi
-			done
-			[[ -n $found ]] || die "the first publication of $codename needs a snapshot for component $c"
-			ordered+=("$found")
+	published=$(published_components "$codename")
+	if [[ -n $published ]]; then
+		for i in "${!comps[@]}"; do
+			if in_csv "${comps[i]}" "$published"; then
+				there+=("${comps[i]}")
+				there_snaps+=("${snaps[i]}")
+			else
+				absent+=("${comps[i]}")
+				absent_snaps+=("${snaps[i]}")
+			fi
 		done
-		csv=$(IFS=,; printf '%s' "${configured[*]}")
-		log "first publication of $codename from ${ordered[*]}"
-		aptly_ publish snapshot "${common[@]}" "-component=$csv" "${extra[@]}" -acquire-by-hash \
-			-distribution="$codename" \
-			-architectures="$(codename_field "$codename" 3)" \
-			-origin="$APT_ORIGIN" -label="$APT_LABEL" \
-			"${ordered[@]}" "$APT_TARGET" >&2
+		if ((${#absent[@]} == 0)); then
+			csv=$(IFS=,; printf '%s' "${comps[*]}")
+			log "switching $codename to ${snaps[*]}"
+			aptly_ publish switch "${common[@]}" "-component=$csv" "${extra[@]}" -skip-cleanup \
+				"$codename" "$APT_TARGET" "${snaps[@]}" >&2
+			return 0
+		fi
+		# Staged changes from an earlier run would leak into this Release.
+		if out=$(aptly_ publish source list "-prefix=$APT_TARGET" "$codename" 2>&1); then
+			die "staged source changes exist for $codename (aptly publish source list); inspect them first"
+		fi
+		[[ $out == *"no source changes exist"* ]] ||
+			die "cannot list the staged source changes of $codename: $out"
+		csv_added=$(IFS=,; printf '%s' "${absent[*]}")
+		log "adding component(s) $csv_added to $codename from ${absent_snaps[*]}"
+		aptly_ publish source add "-component=$csv_added" "-prefix=$APT_TARGET" \
+			"$codename" "${absent_snaps[@]}" >&2
+		if ((${#there[@]})); then
+			csv_present=$(IFS=,; printf '%s' "${there[*]}")
+			aptly_ publish source update "-component=$csv_present" "-prefix=$APT_TARGET" \
+				"$codename" "${there_snaps[@]}" >&2
+		fi
+		aptly_ publish update "${common[@]}" "${extra[@]}" -skip-cleanup \
+			"$codename" "$APT_TARGET" >&2
+		return 0
 	fi
+	for c in "${configured[@]}"; do
+		found=''
+		for i in "${!comps[@]}"; do
+			if [[ ${comps[i]} == "$c" ]]; then found=${snaps[i]}; fi
+		done
+		[[ -n $found ]] || die "the first publication of $codename needs a snapshot for component $c"
+		ordered+=("$found")
+	done
+	csv=$(IFS=,; printf '%s' "${configured[*]}")
+	log "first publication of $codename from ${ordered[*]}"
+	aptly_ publish snapshot "${common[@]}" "-component=$csv" "${extra[@]}" -acquire-by-hash \
+		-distribution="$codename" \
+		-architectures="$(codename_field "$codename" 3)" \
+		-origin="$APT_ORIGIN" -label="$APT_LABEL" \
+		"${ordered[@]}" "$APT_TARGET" >&2
 }
 
 # commit_publications CODENAME/COMPONENT=SNAPSHOT... makes the snapshots

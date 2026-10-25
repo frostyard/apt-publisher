@@ -10,9 +10,14 @@
 # A producer's packages go to the one component it is registered for (main
 # or image, core ADR-0059). A codename that aptly does not publish yet is
 # first published with every configured component; the others start empty.
+# A published codename that lacks a configured component gets it, empty, in
+# the next run, also when the request does not target that codename: aptly
+# cannot add a component by switching (publish_snapshot).
 #
 # Prints "CODENAME SNAPSHOT" for each published codename on stdout, the
-# snapshot being the producer's component. With --report FILE, also writes
+# snapshot being the producer's component, or the added component for a
+# codename the request does not target (several, space-separated, when a run
+# adds more than one). With --report FILE, also writes
 # "codename name version arch component" rows for the packages it published
 # (the input of apt-canary.sh).
 
@@ -105,6 +110,29 @@ for codename in "${!files[@]}"; do
 	reconcile_state "$codename"
 done
 
+# A codename this run publishes no package to (not targeted, or targeted with
+# no package routed to it), but that aptly publishes without a configured
+# component, gets that component in this run too: reconcile it before any
+# repository change.
+extra_codenames=()
+declare -A adding=()
+while IFS= read -r codename; do
+	[[ -n $codename ]] || continue
+	[[ -z ${files[$codename]:-} ]] || continue
+	published_set=$(published_components "$codename")
+	[[ -n $published_set ]] || continue
+	[[ $published_set != "$(component_set "$(codename_components "$codename")")" ]] || continue
+	# The components to add. reconcile_state can already complete an
+	# interrupted addition; the codename is still verified and printed below,
+	# so the workflow purges its CDN cache.
+	adding[$codename]=''
+	for c in $(codename_components "$codename" | tr , ' '); do
+		in_csv "$c" "$published_set" || adding[$codename]+="$c "
+	done
+	reconcile_state "$codename"
+	extra_codenames+=("$codename")
+done < <(awk -F'\t' '!/^#/ && NF { print $1 }' "$APT_CODENAMES_FILE")
+
 declare -A snapshots=()
 commits=()
 for codename in $codenames; do
@@ -120,18 +148,37 @@ for codename in $codenames; do
 	snapshots[$codename]=$(new_snapshot_name "$codename" "$component" "$label")
 	aptly_ snapshot create "${snapshots[$codename]}" from repo "$repo" >/dev/null
 	commits+=("$codename/$component=${snapshots[$codename]}")
-	others=$(first_publication_snapshots "$codename" "$label" "$component")
+	others=$(missing_component_snapshots "$codename" "$label" "$component")
 	if [[ -n $others ]]; then
 		mapfile -t others_list <<<"$others"
 		commits+=("${others_list[@]}")
 	fi
 done
 
+for codename in "${extra_codenames[@]}"; do
+	others=$(missing_component_snapshots "$codename" "$label")
+	[[ -n $others ]] || continue
+	mapfile -t others_list <<<"$others"
+	commits+=("${others_list[@]}")
+done
+
 commit_publications "${commits[@]}"
+
+# Each extra codename is printed with the snapshots of its added components,
+# whether this run's commit or its reconciliation published them.
+for codename in "${extra_codenames[@]}"; do
+	added=()
+	for c in ${adding[$codename]}; do
+		snapshot=$(published_snapshot "$codename" "$c")
+		[[ -n $snapshot ]] || die "aptly does not publish $codename component $c after adding it"
+		added+=("$snapshot")
+	done
+	snapshots[$codename]="${added[*]}"
+done
 
 for codename in "${!snapshots[@]}"; do
 	# shellcheck disable=SC2086 # expect holds space-separated NAME=VERSION words
-	verify_published "$codename" ${expect[$codename]}
+	verify_published "$codename" ${expect[$codename]:-}
 	printf '%s %s\n' "$codename" "${snapshots[$codename]}"
 done
 if [[ -n $report ]]; then

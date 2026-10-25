@@ -107,8 +107,13 @@ frostyard/image-only	imgpkg	trixie,forky	no	-	image
 frostyard/bootc-image	bootc,libostree-1-1	trixie,forky	no	-	image
 frostyard/docs-image	docs-thing	trixie,forky	no	-	image
 EOF
-# Codenames that publish both components. The committed file is main-only.
+# Codenames that publish both components, as config/codenames.tsv does. Only
+# the image sections use this file.
 printf 'trixie\t13\tamd64,arm64,all\tmain,image\nforky\t14\tamd64,arm64,all\tmain,image\n' >"$tmp/codenames-image.tsv"
+# Codenames that publish main only, as every codename did before ADR-0059
+# step 3. Every section before "the image component" runs with this file, so
+# that path stays proven.
+printf 'trixie\t13\tamd64,arm64,all\tmain\nforky\t14\tamd64,arm64,all\tmain\n' >"$tmp/codenames-main.tsv"
 
 # Fail instead of hanging if the local server stalls.
 export RCLONE_TIMEOUT=30s RCLONE_CONTIMEOUT=10s
@@ -118,6 +123,7 @@ export R2_ACCESS_KEY_ID=testaccesskey R2_SECRET_ACCESS_KEY=testsecretkey123
 export APT_S3_ENDPOINT=http://127.0.0.1:$port APT_RCLONE_PROVIDER=Other
 export APT_SIGNING_KEY_FPR=${fprs[0]} APT_KEYRING=$tmp/test-key.gpg
 export APT_PRODUCERS_FILE=$tmp/producers.tsv
+export APT_CODENAMES_FILE=$tmp/codenames-main.tsv
 unset R2_ACCOUNT_ID APTLY_ROOT
 export RCLONE_CONFIG_R2_TYPE=s3 RCLONE_CONFIG_R2_PROVIDER=Other RCLONE_CONFIG_R2_ENDPOINT=$APT_S3_ENDPOINT
 export RCLONE_CONFIG_R2_ACCESS_KEY_ID=testaccesskey RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=testsecretkey123
@@ -281,6 +287,12 @@ mkdir -p "$tmp/gh"
 
 # --- dry run ------------------------------------------------------------------
 
+# The committed configuration publishes both components (core ADR-0059);
+# every section below runs with codenames-main.tsv instead.
+check "the committed codenames publish main,image" \
+	test "$(awk -F'\t' '!/^#/ && NF { print $1 "=" $4 }' "$ROOT/config/codenames.tsv" | paste -sd' ')" = \
+	'trixie=main,image forky=main,image'
+
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb13' amd64
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb14' amd64
 must_pass "dry run succeeds" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/bootc" --dry-run
@@ -288,8 +300,8 @@ check "dry run routes ~deb13 to trixie" grep -q 'bootc_1.16.8-1~deb13_amd64.deb 
 check "dry run routes ~deb14 to forky" grep -q 'bootc_1.16.8-1~deb14_amd64.deb -> forky' "$tmp/err"
 check "dry run touches no state" test -z "$(ls -A "$tmp/s3/frostyard-apt-state")"
 
-# An image producer cannot publish to a codename that does not publish image,
-# the committed state of every codename until ADR-0059 step 3.
+# An image producer cannot publish to a codename that does not publish image;
+# the sections here run with a main-only codenames file.
 mkdeb "$tmp/img-refused" imgpkg 1.0 amd64
 must_fail "an image producer is refused, also in a dry run, for a main-only codename" \
 	"trixie does not publish component image" \
@@ -552,8 +564,8 @@ check "state history keeps replaced database files" \
 check "purge covers InRelease" grep -qx "$APT_PUBLIC_URL/dists/trixie/InRelease" \
 	<("$ROOT/scripts/purge-cache.sh" --print trixie)
 
-# With the committed configuration every codename publishes main only, exactly
-# as before ADR-0059.
+# The main-only codenames file publishes main only, exactly as before
+# ADR-0059 step 3.
 for codename in trixie forky; do
 	check "$codename Release lists the main component only" grep -qx 'Components: main' "$pub/dists/$codename/Release"
 	check "$codename has no image index" test ! -e "$pub/dists/$codename/image"
@@ -660,8 +672,8 @@ check "forky lists the publication" listed forky frostyard-updex 3.3.0
 # --- the image component (core ADR-0059) ---------------------------------------
 #
 # From here every codename publishes main and image, and producers may be
-# registered for image. The sections above ran with the committed main-only
-# configuration and prove that path is unchanged.
+# registered for image. The sections above ran with codenames-main.tsv and
+# prove that path is unchanged.
 
 export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/producers-image.tsv
 # matches REGEX STRING
@@ -894,23 +906,251 @@ must_fail "a failing repository list stops a publication" "cannot list aptly rep
 check "the failed publication left InRelease unchanged" test "$(inrelease trixie)" = "$before"
 check "the failed publication left the state bucket unchanged" test "$(state_sum)" = "$state_before"
 
-# A bucket that publishes main only, while the configuration says main,image,
-# is refused before any change.
-scope mainbucket
-mkdeb "$tmp/mb-updex" frostyard-updex 1.0 amd64
-must_pass "publish to a main-only codename" \
-	env APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
-	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/mb-updex" --codenames trixie
+# --- adding a component to a published codename -----------------------------------
+#
+# `aptly publish switch` cannot add a component. The first run after the
+# configuration gains one stages the addition (`publish source add` and
+# `publish source update`) and writes one signed Release with `publish update`.
+
+# image_snapshot_count prints the number of distinct image snapshots.
+image_snapshot_count() {
+	run switch.sh --list >"$tmp/list" 2>&1
+	grep -oE "(trixie|forky)-image-$snapshot_re-[A-Za-z0-9._-]+" "$tmp/list" | sort -u | wc -l
+}
+
+scope addimage
+
+mkdeb "$tmp/add-thing-old" trixie-thing 1.0 amd64
+mkdeb "$tmp/add-updex" frostyard-updex 1.0 amd64
+must_pass "publish updex 1.0, main only" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/add-updex"
+must_pass "publish trixie-thing 1.0, main only" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/add-thing-old" --codenames trixie
+mkdir -p "$tmp/addimage-saved"
+cp -a "$pub/dists/forky/main" "$tmp/addimage-saved/"
+addimage_same_main() {
+	local f
+	for f in "$pub"/dists/forky/main/binary-*/Packages; do
+		cmp -s "$f" "$tmp/addimage-saved/${f##*/dists/forky/}" || return 1
+	done
+}
+
+mkdeb "$tmp/add-thing" trixie-thing 1.1 amd64
+must_pass "a trixie-only publication adds image to trixie and forky" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/add-thing"
+check "the run names trixie's addition" grep -q 'adding component(s) image to trixie' "$tmp/err"
+check "the run names forky's addition" grep -q 'adding component(s) image to forky' "$tmp/err"
+for codename in trixie forky; do
+	check "$codename Release lists both components after the addition" \
+		grep -qx 'Components: image main' "$pub/dists/$codename/Release"
+	check "$codename has an image index for every architecture" \
+		test "$(find "$pub/dists/$codename/image" -mindepth 2 -maxdepth 2 -name Packages | wc -l)" = 3
+	check "$codename image is empty" test "$(cat "$pub/dists/$codename"/image/binary-*/Packages | wc -c)" = 0
+done
+check "forky's main indexes stay byte-identical" addimage_same_main
+check "trixie main lists the new package" listed_in trixie main trixie-thing 1.1
+check "trixie main keeps the older package" listed_in trixie main trixie-thing 1.0
+check "the adding run reports two codenames" test "$(wc -l <"$tmp/out")" = 2
+check "the trixie line names the main snapshot" \
+	matches "^trixie-$snapshot_re-trixie-only(\.[0-9]+)?\$" "$(awk '$1 == "trixie" { print $2 }' "$tmp/out")"
+check "the forky line names the image snapshot" \
+	matches "^forky-image-$snapshot_re-trixie-only(\.[0-9]+)?\$" "$(awk '$1 == "forky" { print $2 }' "$tmp/out")"
+must_pass "trixie passes the deep check after the addition" run verify.sh trixie --deep
+must_pass "forky passes the deep check after the addition" run verify.sh forky --deep
+check "apt with both components reads trixie without a warning" \
+	candidate_is trixie amd64 trixie-thing 1.1 'main image'
+must_pass "switch --list after the addition" run switch.sh --list
+check "the addition leaves no pending marker" test "$(grep -c '^pending:' "$tmp/out" || true)" = 0
+
+# A second run must not add the component again.
+image_trixie=$(index_sum trixie image)
+image_forky=$(index_sum forky image)
+mkdeb "$tmp/add-updex-next" frostyard-updex 1.1 amd64
+must_pass "a later main publication switches as before" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/add-updex-next"
+check "the second run logs no addition" test "$(grep -c 'adding component' "$tmp/err" || true)" = 0
+check "trixie's image indexes are unchanged" test "$(index_sum trixie image)" = "$image_trixie"
+check "forky's image indexes are unchanged" test "$(index_sum forky image)" = "$image_forky"
+check "the second run created no image snapshot" test "$(image_snapshot_count)" = 2
+check "the second run reports main snapshots" \
+	test "$(grep -Ec "^(trixie|forky) (trixie|forky)-$snapshot_re-" "$tmp/out")" = 2
+
+# A run that targets one codename leaves the other's InRelease alone.
+before=$(inrelease forky)
+mkdeb "$tmp/add-thing-next" trixie-thing 1.2 amd64
+must_pass "a trixie-only run after the addition" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/add-thing-next"
+check "a trixie-only run leaves forky's InRelease unchanged" test "$(inrelease forky)" = "$before"
+
+# Removing a component is a separate migration.
 before=$(inrelease trixie)
 state_before=$(state_sum)
-mkdeb "$tmp/mb-updex2" frostyard-updex 1.1 amd64
-must_fail "a main-only bucket is refused for a main producer" "ADR-0059" \
-	run publish.sh --producer frostyard/updex --debs "$tmp/mb-updex2" --codenames trixie
-check "the refusal names the published and configured components" grep -q 'components main, but the configuration says image,main' "$tmp/err"
-must_fail "a main-only bucket is refused for an image producer" "ADR-0059" \
-	run publish.sh --producer frostyard/image-only --debs "$tmp/c-img" --codenames trixie
-check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
-check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+mkdeb "$tmp/add-thing-removal" trixie-thing 1.3 amd64
+must_fail "a main-only configuration cannot remove image" \
+	"Removing a component is a separate migration" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/add-thing-removal" --codenames trixie
+check "the removal refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the removal refusal left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+
+# A codename that the request targets but no package routes to also gets the
+# component: bootc-debian's default codenames are trixie and forky, and a
+# ~deb13 build goes to trixie only.
+scope addrouted
+mkdeb "$tmp/arouted-updex" frostyard-updex 1.0 amd64
+must_pass "publish updex to trixie and forky, main only" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/arouted-updex"
+mkdir -p "$tmp/arouted-saved"
+cp -a "$pub/dists/forky/main" "$tmp/arouted-saved/"
+mkdeb "$tmp/arouted-bootc" bootc '1.0-1~deb13' amd64
+must_pass "a ~deb13 publication with default codenames" \
+	run publish.sh --producer frostyard/bootc-debian --debs "$tmp/arouted-bootc"
+check "the run names forky's addition" grep -q 'adding component(s) image to forky' "$tmp/err"
+check "forky lists both components" grep -qx 'Components: image main' "$pub/dists/forky/Release"
+check "forky's main indexes stay byte-identical" \
+	diff -r "$tmp/arouted-saved/main" "$pub/dists/forky/main" -x by-hash -x Release -x 'Packages.*'
+check "forky does not get the ~deb13 build" not_listed_in forky main bootc '1.0-1~deb13'
+check "the run reports forky's image snapshot" \
+	matches "^forky-image-$snapshot_re-bootc-debian(\.[0-9]+)?\$" "$(awk '$1 == "forky" { print $2 }' "$tmp/out")"
+must_pass "forky passes the deep check" run verify.sh forky --deep
+
+# An addition interrupted after it became visible: the bucket Release lists
+# image, the database publishes main only, and the image marker names the new
+# snapshot. The next run completes it.
+scope addint
+export SHIM_STATE_PATH=addint
+mkdeb "$tmp/aint-main" frostyard-updex 1.0 amd64
+must_pass "publish main only before the interrupted addition" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/aint-main" --codenames trixie
+rm -f -- "$tmp/shim-rclone/count"
+export SHIM_FAIL_AT=2
+mkdeb "$tmp/aint-thing" trixie-thing 1.0 amd64
+must_fail "an addition interrupted after it became visible fails" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/aint-thing" --codenames trixie
+check "the interrupted addition is visible" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+mkdeb "$tmp/aint-thing-next" trixie-thing 1.1 amd64
+must_pass "the next run completes the addition" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/aint-thing-next" --codenames trixie
+check "that run reported the completion" \
+	grep -q 'completing the interrupted publication of trixie' "$tmp/err"
+must_pass "the completed addition verifies" run verify.sh trixie --deep
+check "the completion created no second trixie image snapshot" test "$(image_snapshot_count)" = 1
+
+# An addition interrupted before it became visible: the next run adds image.
+scope addint2
+export SHIM_STATE_PATH=addint2
+mkdeb "$tmp/aint2-main" frostyard-updex 1.0 amd64
+must_pass "publish main only before a failing addition" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/aint2-main" --codenames trixie
+before=$(inrelease trixie)
+rm -f -- "$tmp/shim-rclone/count"
+export SHIM_FAIL_AT=1
+mkdeb "$tmp/aint2-thing" trixie-thing 1.0 amd64
+must_fail "an addition interrupted before it became visible fails" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/aint2-thing" --codenames trixie
+check "the failed addition left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+mkdeb "$tmp/aint2-thing-next" trixie-thing 1.1 amd64
+must_pass "the next run adds image" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/aint2-thing-next" --codenames trixie
+check "that run names the addition" grep -q 'adding component(s) image to trixie' "$tmp/err"
+check "trixie publishes both components" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+check "trixie image is still empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
+must_pass "the added suite verifies" run verify.sh trixie --deep
+
+# Both additions of a run interrupted after they became visible: the next
+# trixie-only run completes forky's in its reconciliation, and still verifies
+# and prints forky, so the workflow purges forky's CDN cache.
+scope addint3
+export SHIM_STATE_PATH=addint3
+mkdeb "$tmp/aint3-updex" frostyard-updex 1.0 amd64
+must_pass "publish updex to trixie and forky before two interrupted additions" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/aint3-updex"
+rm -f -- "$tmp/shim-rclone/count"
+export SHIM_FAIL_AT=2
+mkdeb "$tmp/aint3-thing" trixie-thing 1.0 amd64
+must_fail "two additions interrupted after they became visible fail" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/aint3-thing"
+check "forky's interrupted addition is visible" grep -qx 'Components: image main' "$pub/dists/forky/Release"
+mkdeb "$tmp/aint3-thing-next" trixie-thing 1.1 amd64
+must_pass "a trixie-only run completes both additions" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/aint3-thing-next"
+check "that run completed forky's addition" grep -q 'completing the interrupted publication of forky' "$tmp/err"
+check "that run staged no second addition for forky" test "$(grep -c 'adding component(s) image to forky' "$tmp/err" || true)" = 1
+check "that run prints forky with its image snapshot" \
+	matches "^forky-image-$snapshot_re-trixie-only(\.[0-9]+)?\$" "$(awk '$1 == "forky" { print $2 }' "$tmp/out")"
+check "that run read forky back" grep -q '^verified forky' "$tmp/err"
+must_pass "forky passes the deep check after the completion" run verify.sh forky --deep
+check "only 1 forky image snapshot exists" \
+	test "$(run switch.sh --list 2>&1 | grep -oE "forky-image-$snapshot_re-[A-Za-z0-9._-]+" | sort -u | wc -l)" = 1
+
+# A failed publication query is an error, not "no component published": the
+# helper runs inside $(...), where errexit is off.
+# shellcheck disable=SC2016 # the script expands in the child shell
+check "missing_component_snapshots fails when the publication list fails" \
+	bash -c '. "$1/scripts/lib.sh"
+		calls=$2
+		published_components() { return 1; }
+		aptly_() { printf "%s\n" "$*" >>"$calls"; }
+		if out=$(missing_component_snapshots forky label); then exit 1; fi
+		[[ -z $out && ! -e $calls ]]' _ "$ROOT" "$tmp/mcs-aptly-calls"
+
+# A withdrawal adds the component too, in the same Release.
+scope addwithdraw
+mkdeb "$tmp/awd-a" frostyard-updex 1.0 amd64
+mkdeb "$tmp/awd-b" frostyard-updex 1.1 amd64
+for deb in "$tmp/awd-a" "$tmp/awd-b"; do
+	for f in "$deb"/*.deb; do
+		must_pass "publish $(basename "$f"), main only" \
+			env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+			"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$deb" --codenames trixie
+	done
+done
+must_pass "a withdrawal adds image to trixie" \
+	run withdraw.sh --codename trixie --package frostyard-updex --version 1.0
+check "the withdrawal prints one line" test "$(wc -l <"$tmp/out")" = 1
+check "the withdrawal's Release lists both components" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+check "main lacks the withdrawn version" not_listed_in trixie main frostyard-updex 1.0
+check "main keeps the other version" listed_in trixie main frostyard-updex 1.1
+check "image is empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
+must_pass "the withdrawal's suite verifies" run verify.sh trixie --deep
+
+# A rollback adds the component too, and then needs one snapshot per component.
+scope addrollback
+mkdeb "$tmp/arb-a" frostyard-updex 1.0 amd64
+must_pass "publish 1.0, main only" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/arb-a" --codenames trixie
+rb_main1=$(cut -d' ' -f2 "$tmp/out")
+mkdeb "$tmp/arb-b" frostyard-updex 1.1 amd64
+must_pass "publish 1.1, main only" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/arb-b" --codenames trixie
+rb_main2=$(cut -d' ' -f2 "$tmp/out")
+must_pass "a rollback with one main snapshot adds image" \
+	run switch.sh --codename trixie --snapshot "$rb_main1"
+check "the rollback's Release lists both components" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+check "image starts empty after the rollback" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
+check "main lists only the first version" listed_in trixie main frostyard-updex 1.0
+check "main does not list the later version" not_listed_in trixie main frostyard-updex 1.1
+rb_image=$(run switch.sh --list >"$tmp/list" 2>&1
+	grep -oE "trixie-image-$snapshot_re-[A-Za-z0-9._-]+" "$tmp/list" | sort -u | sed -n 1p)
+before=$(inrelease trixie)
+must_fail "a rollback with only a main snapshot is refused once image is published" \
+	"give a snapshot for component image too" \
+	run switch.sh --codename trixie --snapshot "$rb_main2"
+check "the refused rollback left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_pass "a rollback with the second main snapshot and the image snapshot" \
+	run switch.sh --codename trixie --snapshot "$rb_main2" --snapshot "$rb_image"
+check "main lists the second version again" listed_in trixie main frostyard-updex 1.1
 
 # An image producer's first publication also publishes main, empty.
 scope auditimg
@@ -951,7 +1191,7 @@ fi
 check "the audit does not look in main for an image producer" \
 	grep -qx 'MISSING frostyard/image-only v1.2 frostyard-updex_3.1.0_amd64.deb' "$tmp/out"
 
-# Back to the committed configuration for the checks that follow.
+# The secrets check reads no codename list, so the committed default is fine.
 unset APT_CODENAMES_FILE
 export APT_PRODUCERS_FILE=$tmp/producers.tsv
 

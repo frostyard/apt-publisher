@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
-# Point-in-time rollback: publish CODENAME from earlier snapshots, one for
-# each of its components, and rebuild the codename's working repositories
-# from them, so later publications build on the rolled-back contents instead
-# of restoring what was rolled back. Everything published to CODENAME after
-# the snapshots is unpublished, including other producers' packages;
-# republish a release to roll it forward. Pool files are never deleted.
+# Point-in-time rollback: publish CODENAME from earlier snapshots and rebuild
+# the working repository of each component you give from its snapshot, so
+# later publications build on the rolled-back contents instead of restoring
+# what was rolled back. Everything published to CODENAME after the snapshots
+# is unpublished, including other producers' packages; republish a release to
+# roll it forward. Pool files are never deleted.
 #
-# Give --snapshot once for each component the codename publishes. A snapshot
-# is named for its codename and component: CODENAME-TIME-LABEL for main,
-# CODENAME-image-TIME-LABEL for image.
+# Give --snapshot for the components to roll back, each named for CODENAME and
+# its component: CODENAME-TIME-LABEL for main, CODENAME-image-TIME-LABEL for
+# image. A configured component without a snapshot is added empty when the
+# codename is published without it (core ADR-0059: `publish switch` cannot add
+# a component); otherwise the codename needs a snapshot for every component,
+# and a codename that aptly does not publish yet needs all of them.
 #
 # To pull a single version instead, use withdraw.sh.
 #
@@ -25,7 +28,8 @@ usage() {
 usage: switch.sh --codename CODENAME --snapshot SNAPSHOT [--snapshot SNAPSHOT]... [--force]
        switch.sh --list
 
-  --snapshot  repeat it once for each component the codename publishes
+  --snapshot  one for each component to roll back; a configured component
+              the published codename lacks is added empty
 EOF
 	exit 2
 }
@@ -72,22 +76,20 @@ for snapshot in "${snapshots[@]}"; do
 		die "got two snapshots for $codename component $component (${by_component[$component]} and $snapshot); give one for each of: ${configured//,/ }"
 	by_component[$component]=$snapshot
 done
-specs=()
+given=()
 for component in ${configured//,/ }; do
-	[[ -n ${by_component[$component]:-} ]] ||
-		die "$codename publishes ${configured//,/ }: give a snapshot for component $component too"
-	specs+=("$codename/$component=${by_component[$component]}")
+	[[ -z ${by_component[$component]:-} ]] || given+=("$component")
 done
 
 aptly_init
 for snapshot in "${snapshots[@]}"; do
 	snapshot_exists "$snapshot" || die "no snapshot named $snapshot"
 done
-# One package name belongs in one component (core ADR-0059): the selected
+# One package name belongs in one component (core ADR-0059): the given
 # snapshots must not share a name, with or without --force. Nothing has
 # changed yet.
-if ((${#snapshots[@]} > 1)); then
-	overlap=$(for component in ${configured//,/ }; do snapshot_names "${by_component[$component]}"; done |
+if ((${#given[@]} > 1)); then
+	overlap=$(for component in "${given[@]}"; do snapshot_names "${by_component[$component]}"; done |
 		LC_ALL=C sort | uniq -d)
 	[[ -z $overlap ]] || die "the snapshots publish ${overlap//$'\n'/ } in more than one component; pick snapshots that keep one name in one component"
 fi
@@ -99,9 +101,28 @@ if ((force)); then
 else
 	reconcile_state "$codename"
 fi
+# A configured component without a snapshot is added empty when the codename
+# is published without it; otherwise it needs a snapshot. Before any
+# rebuild_repo.
+published_set=$(published_components "$codename")
 for component in ${configured//,/ }; do
+	[[ -n ${by_component[$component]:-} ]] && continue
+	if [[ -z $published_set ]] || in_csv "$component" "$published_set"; then
+		die "$codename publishes ${configured//,/ }: give a snapshot for component $component too"
+	fi
+done
+for component in "${given[@]}"; do
 	rebuild_repo "$codename" "$component" "${by_component[$component]}"
 done
+specs=()
+for component in "${given[@]}"; do
+	specs+=("$codename/$component=${by_component[$component]}")
+done
+others=$(missing_component_snapshots "$codename" rollback "${given[@]}")
+if [[ -n $others ]]; then
+	mapfile -t others_list <<<"$others"
+	specs+=("${others_list[@]}")
+fi
 commit_publications "${specs[@]}"
 verify_published "$codename" --deep
 printf '%s %s\n' "$codename" "${snapshots[*]}"

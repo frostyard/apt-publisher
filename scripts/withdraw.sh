@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Withdraw one package version from a codename: remove it from the working
 # repository of the component that holds it, snapshot, and publish only that
-# component, leaving every other package and component as it is.
-# The file stays in the pool. Republishing the same release adds it back.
+# component, leaving every other package and component as it is. A configured
+# component that the codename does not publish yet is added empty in the same
+# publication (core ADR-0059). The file stays in the pool. Republishing the
+# same release adds it back.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -58,9 +60,18 @@ fi
 component=${found[0]}
 repo=$(repo_name "$codename" "$component")
 aptly_ repo remove "$repo" "$query" >&2
-snapshot=$(new_snapshot_name "$codename" "$component" "withdraw-$name-$version${arch:+-$arch}")
+label="withdraw-$name-$version${arch:+-$arch}"
+snapshot=$(new_snapshot_name "$codename" "$component" "$label")
 aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
-commit_publications "$codename/$component=$snapshot"
+commits=("$codename/$component=$snapshot")
+# A configured component the codename does not publish yet, with the same
+# label as the withdrawal snapshot.
+others=$(missing_component_snapshots "$codename" "$label" "$component")
+if [[ -n $others ]]; then
+	mapfile -t others_list <<<"$others"
+	commits+=("${others_list[@]}")
+fi
+commit_publications "${commits[@]}"
 if [[ -z $arch ]]; then
 	verify_published "$codename" "!$component/$name=$version"
 else
