@@ -235,7 +235,8 @@ ensure_repo() {
 	local repo
 	repo=$(repo_name "$1" "$2")
 	if ! aptly_ repo show "$repo" >/dev/null 2>&1; then
-		aptly_ repo create -distribution="$1" -component="$2" "$repo" >/dev/null
+		aptly_ repo create -distribution="$1" -component="$2" "$repo" >/dev/null ||
+			die "cannot create the aptly repository $repo"
 	fi
 	printf '%s\n' "$repo"
 }
@@ -282,7 +283,9 @@ missing_component_snapshots() {
 	local codename=$1 label=$2 c repo snapshot published
 	local -a absent=()
 	shift 2
-	published=$(published_components "$codename")
+	# Callers run this inside $(...), where errexit is off: every failure
+	# returns explicitly, so a failed query never reads as "nothing published".
+	published=$(published_components "$codename") || return 1
 	for c in $(codename_components "$codename" | tr , ' '); do
 		in_csv "$c" "$(IFS=,; printf '%s' "$*")" && continue
 		in_csv "$c" "$published" && continue
@@ -290,9 +293,9 @@ missing_component_snapshots() {
 	done
 	((${#absent[@]})) || return 0
 	for c in "${absent[@]}"; do
-		repo=$(ensure_repo "$codename" "$c")
-		snapshot=$(new_snapshot_name "$codename" "$c" "$label")
-		aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
+		repo=$(ensure_repo "$codename" "$c") || return 1
+		snapshot=$(new_snapshot_name "$codename" "$c" "$label") || return 1
+		aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null || return 1
 		printf '%s/%s=%s\n' "$codename" "$c" "$snapshot"
 	done
 }

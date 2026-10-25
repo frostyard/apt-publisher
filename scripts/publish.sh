@@ -115,12 +115,20 @@ done
 # component, gets that component in this run too: reconcile it before any
 # repository change.
 extra_codenames=()
+declare -A adding=()
 while IFS= read -r codename; do
 	[[ -n $codename ]] || continue
 	[[ -z ${files[$codename]:-} ]] || continue
 	published_set=$(published_components "$codename")
 	[[ -n $published_set ]] || continue
 	[[ $published_set != "$(component_set "$(codename_components "$codename")")" ]] || continue
+	# The components to add. reconcile_state can already complete an
+	# interrupted addition; the codename is still verified and printed below,
+	# so the workflow purges its CDN cache.
+	adding[$codename]=''
+	for c in $(codename_components "$codename" | tr , ' '); do
+		in_csv "$c" "$published_set" || adding[$codename]+="$c "
+	done
 	reconcile_state "$codename"
 	extra_codenames+=("$codename")
 done < <(awk -F'\t' '!/^#/ && NF { print $1 }' "$APT_CODENAMES_FILE")
@@ -152,14 +160,21 @@ for codename in "${extra_codenames[@]}"; do
 	[[ -n $others ]] || continue
 	mapfile -t others_list <<<"$others"
 	commits+=("${others_list[@]}")
-	added=()
-	for spec in "${others_list[@]}"; do
-		added+=("${spec#*=}")
-	done
-	snapshots[$codename]="${added[*]}"
 done
 
 commit_publications "${commits[@]}"
+
+# Each extra codename is printed with the snapshots of its added components,
+# whether this run's commit or its reconciliation published them.
+for codename in "${extra_codenames[@]}"; do
+	added=()
+	for c in ${adding[$codename]}; do
+		snapshot=$(published_snapshot "$codename" "$c")
+		[[ -n $snapshot ]] || die "aptly does not publish $codename component $c after adding it"
+		added+=("$snapshot")
+	done
+	snapshots[$codename]="${added[*]}"
+done
 
 for codename in "${!snapshots[@]}"; do
 	# shellcheck disable=SC2086 # expect holds space-separated NAME=VERSION words

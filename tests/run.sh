@@ -1064,6 +1064,44 @@ check "trixie publishes both components" grep -qx 'Components: image main' "$pub
 check "trixie image is still empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
 must_pass "the added suite verifies" run verify.sh trixie --deep
 
+# Both additions of a run interrupted after they became visible: the next
+# trixie-only run completes forky's in its reconciliation, and still verifies
+# and prints forky, so the workflow purges forky's CDN cache.
+scope addint3
+export SHIM_STATE_PATH=addint3
+mkdeb "$tmp/aint3-updex" frostyard-updex 1.0 amd64
+must_pass "publish updex to trixie and forky before two interrupted additions" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/aint3-updex"
+rm -f -- "$tmp/shim-rclone/count"
+export SHIM_FAIL_AT=2
+mkdeb "$tmp/aint3-thing" trixie-thing 1.0 amd64
+must_fail "two additions interrupted after they became visible fail" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/aint3-thing"
+check "forky's interrupted addition is visible" grep -qx 'Components: image main' "$pub/dists/forky/Release"
+mkdeb "$tmp/aint3-thing-next" trixie-thing 1.1 amd64
+must_pass "a trixie-only run completes both additions" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/aint3-thing-next"
+check "that run completed forky's addition" grep -q 'completing the interrupted publication of forky' "$tmp/err"
+check "that run staged no second addition for forky" test "$(grep -c 'adding component(s) image to forky' "$tmp/err" || true)" = 1
+check "that run prints forky with its image snapshot" \
+	matches "^forky-image-$snapshot_re-trixie-only(\.[0-9]+)?\$" "$(awk '$1 == "forky" { print $2 }' "$tmp/out")"
+check "that run read forky back" grep -q '^verified forky' "$tmp/err"
+must_pass "forky passes the deep check after the completion" run verify.sh forky --deep
+check "only 1 forky image snapshot exists" \
+	test "$(run switch.sh --list 2>&1 | grep -oE "forky-image-$snapshot_re-[A-Za-z0-9._-]+" | sort -u | wc -l)" = 1
+
+# A failed publication query is an error, not "no component published": the
+# helper runs inside $(...), where errexit is off.
+# shellcheck disable=SC2016 # the script expands in the child shell
+check "missing_component_snapshots fails when the publication list fails" \
+	bash -c '. "$1/scripts/lib.sh"
+		published_components() { return 1; }
+		aptly_() { printf "%s\n" "$*" >>"$2"; }
+		if out=$(missing_component_snapshots forky label); then exit 1; fi
+		[[ -z $out && ! -e $2 ]]' _ "$ROOT" "$tmp/mcs-aptly-calls"
+
 # A withdrawal adds the component too, in the same Release.
 scope addwithdraw
 mkdeb "$tmp/awd-a" frostyard-updex 1.0 amd64
