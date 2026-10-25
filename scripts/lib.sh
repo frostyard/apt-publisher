@@ -54,6 +54,40 @@ codename_for_major() {
 		"$APT_CODENAMES_FILE"
 }
 
+# --- components (core ADR-0059) -------------------------------------------------
+#
+# A codename publishes the components in column 4 of config/codenames.tsv:
+# main, or main,image. Each component has its own working repository,
+# snapshots, pending marker and pool path.
+
+# Every component the publisher knows; used to clear markers whatever the
+# configuration says.
+ALL_COMPONENTS="main image"
+
+# codename_components CODENAME prints the configured components, comma-separated.
+codename_components() { codename_field "$1" 4; }
+
+# component_set CSV prints a comma list, sorted and without duplicates.
+component_set() { tr , '\n' <<<"$1" | LC_ALL=C sort -u | paste -sd, -; }
+
+# release_components RELEASE prints the components a Release file lists, as a
+# component_set.
+release_components() { component_set "$(sed -n 's/^Components: //p' "$1" | tr ' ' ,)"; }
+
+# snapshot_component CODENAME SNAPSHOT prints the component SNAPSHOT was
+# named for, and fails when the name matches neither pattern:
+#   main   CODENAME-<UTC time>-<label>
+#   image  CODENAME-image-<UTC time>-<label>
+snapshot_component() {
+	if [[ $2 =~ ^$1-image-[0-9]{8}T[0-9]{6}Z- ]]; then
+		printf 'image\n'
+	elif [[ $2 =~ ^$1-[0-9]{8}T[0-9]{6}Z- ]]; then
+		printf 'main\n'
+	else
+		return 1
+	fi
+}
+
 # stanzas_tsv PACKAGES... prints one row per stanza:
 # Filename SHA256 Size Package Version Architecture MD5sum
 stanzas_tsv() {
@@ -110,8 +144,9 @@ aptly_init() {
 #   pool/  aptly's package pool, append-only. aptly reads a pool file
 #          whenever a snapshot it publishes references a package the public
 #          bucket does not hold yet.
-#   txn/   pending-<codename>: the snapshot a publication was about to make
-#          visible, so an interrupted run can be completed (reconcile_state).
+#   txn/   pending-<codename> (main) and pending-<codename>-image: the
+#          snapshot a publication was about to make visible, so an interrupted
+#          run can be completed (reconcile_state).
 
 state_remote() { printf 'r2:%s/%s' "$APT_STATE_BUCKET" "$APT_STATE_PATH"; }
 
@@ -139,7 +174,22 @@ state_save() {
 		"$APTLY_ROOT/txn" "$(state_remote)/txn"
 }
 
-pending_file() { printf '%s/txn/pending-%s' "$APTLY_ROOT" "$1"; }
+# pending_file CODENAME COMPONENT: the marker keeps the main path of a
+# main-only codename; image has its own.
+pending_file() {
+	case $2 in
+	main) printf '%s/txn/pending-%s' "$APTLY_ROOT" "$1" ;;
+	*) printf '%s/txn/pending-%s-%s' "$APTLY_ROOT" "$1" "$2" ;;
+	esac
+}
+
+# drop_pending CODENAME removes the markers of every component.
+drop_pending() {
+	local c
+	for c in $ALL_COMPONENTS; do
+		rm -f -- "$(pending_file "$1" "$c")"
+	done
+}
 
 # snapshot_exists SNAPSHOT. Not `aptly snapshot show`: it fails once the
 # snapshot's source repository has been rebuilt (rebuild_repo). The list is
@@ -152,11 +202,11 @@ snapshot_exists() {
 	grep -qxF -- "$1" <<<"$list"
 }
 
-# pending_snapshot CODENAME prints the recorded pending snapshot, if it
-# exists in the database.
+# pending_snapshot CODENAME COMPONENT prints the recorded pending snapshot,
+# if it exists in the database.
 pending_snapshot() {
 	local f snapshot
-	f=$(pending_file "$1")
+	f=$(pending_file "$1" "$2")
 	[[ -f $f ]] || return 0
 	snapshot=$(<"$f")
 	if snapshot_exists "$snapshot"; then
@@ -166,37 +216,46 @@ pending_snapshot() {
 
 # --- repositories, snapshots, publications ---------------------------------------
 
-repo_name() { printf 'frostyard-%s' "$1"; }
+# repo_name CODENAME COMPONENT: frostyard-CODENAME for main (unchanged),
+# frostyard-CODENAME-image for image.
+repo_name() {
+	case $2 in
+	main) printf 'frostyard-%s' "$1" ;;
+	*) printf 'frostyard-%s-%s' "$1" "$2" ;;
+	esac
+}
 
-# ensure_repo CODENAME creates the local repository for CODENAME if needed
-# and prints its name.
+# ensure_repo CODENAME COMPONENT creates the local repository for the
+# component if needed and prints its name.
 ensure_repo() {
 	local repo
-	repo=$(repo_name "$1")
+	repo=$(repo_name "$1" "$2")
 	if ! aptly_ repo show "$repo" >/dev/null 2>&1; then
-		aptly_ repo create -distribution="$1" -component="$APT_COMPONENT" "$repo" >/dev/null
+		aptly_ repo create -distribution="$1" -component="$2" "$repo" >/dev/null
 	fi
 	printf '%s\n' "$repo"
 }
 
-# rebuild_repo CODENAME SNAPSHOT replaces the codename's working repository
-# with SNAPSHOT's contents, so later publications build on it.
+# rebuild_repo CODENAME COMPONENT SNAPSHOT replaces the component's working
+# repository with SNAPSHOT's contents, so later publications build on it.
 rebuild_repo() {
 	local repo
-	repo=$(repo_name "$1")
+	repo=$(repo_name "$1" "$2")
 	if aptly_ repo show "$repo" >/dev/null 2>&1; then
 		# -force: the repository's snapshots stay; only the working copy goes.
 		aptly_ repo drop -force "$repo" >/dev/null
 	fi
-	aptly_ repo create -distribution="$1" -component="$APT_COMPONENT" "$repo" from snapshot "$2" >/dev/null
-	log "rebuilt $repo from $2"
+	aptly_ repo create -distribution="$1" -component="$2" "$repo" from snapshot "$3" >/dev/null
+	log "rebuilt $repo from $3"
 }
 
-# new_snapshot_name CODENAME LABEL prints an unused snapshot name.
+# new_snapshot_name CODENAME COMPONENT LABEL prints an unused snapshot name.
 new_snapshot_name() {
 	local label base name n=1
-	label=$(printf '%s' "$2" | tr -c 'A-Za-z0-9._-' '-')
-	base="$1-$(date -u +%Y%m%dT%H%M%SZ)-$label"
+	label=$(printf '%s' "$3" | tr -c 'A-Za-z0-9._-' '-')
+	base="$1-"
+	[[ $2 == main ]] || base+="$2-"
+	base+="$(date -u +%Y%m%dT%H%M%SZ)-$label"
 	name=$base
 	while snapshot_exists "$name"; do
 		n=$((n + 1))
@@ -205,11 +264,97 @@ new_snapshot_name() {
 	printf '%s\n' "$name"
 }
 
-# published_snapshot CODENAME prints the snapshot aptly's database says the
-# codename is published from, or nothing.
+# first_publication_snapshots CODENAME LABEL COMPONENT... prints
+# "CODENAME/COMPONENT=SNAPSHOT" for every configured component that is not
+# among the COMPONENTs, when aptly does not publish CODENAME yet: the first
+# publication needs a snapshot of every component. Each snapshot is taken
+# from the component's working repository, which may be empty.
+first_publication_snapshots() {
+	local codename=$1 label=$2 c repo snapshot
+	local -a absent=()
+	shift 2
+	for c in $(codename_components "$codename" | tr , ' '); do
+		in_csv "$c" "$(IFS=,; printf '%s' "$*")" || absent+=("$c")
+	done
+	((${#absent[@]})) || return 0
+	[[ -z $(published_components "$codename") ]] || return 0
+	for c in "${absent[@]}"; do
+		repo=$(ensure_repo "$codename" "$c")
+		snapshot=$(new_snapshot_name "$codename" "$c" "$label")
+		aptly_ snapshot create "$snapshot" from repo "$repo" >/dev/null
+		printf '%s/%s=%s\n' "$codename" "$c" "$snapshot"
+	done
+}
+
+# repo_exists REPO reports whether aptly has a local repository of that name.
+# The list is read in full (see snapshot_exists), and a failure is fatal: it
+# is never read as "no repository".
+repo_exists() {
+	local list
+	list=$(aptly_ repo list -raw) || die "cannot list aptly repositories"
+	grep -qxF -- "$1" <<<"$list"
+}
+
+# has_package repo|snapshot NAME PACKAGE: does the repository or snapshot hold
+# a package of that name, in any version? "No results" means no; any other
+# aptly error is fatal.
+has_package() {
+	local out
+	if out=$(aptly_ "$1" search -format='{{.Package}}' "$2" "$3" 2>&1); then
+		return 0
+	fi
+	[[ $out == *"no results"* ]] && return 1
+	die "cannot search $1 $2 for $3: $out"
+}
+
+# one_component_rule CODENAME COMPONENT NAME... refuses a package name that
+# CODENAME already has in a component other than COMPONENT, in that
+# component's working repository or in its published snapshot (core
+# ADR-0059). Callers run it after reconcile_state and before adding packages.
+one_component_rule() {
+	local codename=$1 component=$2 other repo published name
+	shift 2
+	for other in $(codename_components "$codename" | tr , ' '); do
+		[[ $other != "$component" ]] || continue
+		repo=$(repo_name "$codename" "$other")
+		published=$(published_snapshot "$codename" "$other")
+		for name in "$@"; do
+			if repo_exists "$repo" && has_package repo "$repo" "$name"; then
+				die "$codename already publishes $name in component $other"
+			fi
+			if [[ -n $published ]] && has_package snapshot "$published" "$name"; then
+				die "$codename already publishes $name in component $other"
+			fi
+		done
+	done
+}
+
+# snapshot_names SNAPSHOT prints the package names in SNAPSHOT, sorted and
+# unique. An empty snapshot gives nothing; any other aptly error is fatal.
+snapshot_names() {
+	local out
+	if ! out=$(aptly_ snapshot search -format='{{.Package}}' "$1" 2>&1); then
+		[[ $out == *"no results"* ]] || die "cannot search snapshot $1: $out"
+		return 0
+	fi
+	LC_ALL=C sort -u <<<"$out"
+}
+
+# published_snapshot CODENAME COMPONENT prints the snapshot aptly's database
+# says the component is published from, or nothing.
 published_snapshot() {
-	aptly_ publish list -json | jq -r --arg p "$APT_PREFIX" --arg d "$1" --arg c "$APT_COMPONENT" \
+	aptly_ publish list -json | jq -r --arg p "$APT_PREFIX" --arg d "$1" --arg c "$2" \
 		'.[] | select(.Storage == "s3:r2" and .Prefix == $p and .Distribution == $d) | .Sources[] | select(.Component == $c) | .Name'
+}
+
+# published_components CODENAME prints the components aptly's database
+# publishes for the codename, as a component_set; nothing when unpublished.
+published_components() {
+	local names
+	names=$(aptly_ publish list -json | jq -r --arg p "$APT_PREFIX" --arg d "$1" \
+		'.[] | select(.Storage == "s3:r2" and .Prefix == $p and .Distribution == $d) | .Sources[].Component') ||
+		die "cannot list aptly's publications"
+	component_set "${names//$'\n'/,}"
 }
 
 # snapshot_set SNAPSHOT prints its packages as sorted "name version arch".
@@ -229,96 +374,182 @@ remote_has_dist() {
 	grep -qx "$1/" <<<"$out"
 }
 
-# bucket_set CODENAME prints the packages the bucket's indexes list, as
-# sorted "name version arch".
+# bucket_set CODENAME COMPONENT prints the packages the bucket's indexes
+# list for the component, as sorted "name version arch".
 bucket_set() {
 	local arch tmp
 	tmp=$(mktemp)
 	for arch in $(codename_field "$1" 3 | tr , ' '); do
-		rclone cat "r2:$APT_BUCKET/$APT_PREFIX/dists/$1/$APT_COMPONENT/binary-$arch/Packages" >>"$tmp" ||
-			die "cannot read the published $1 $arch index"
+		rclone cat "r2:$APT_BUCKET/$APT_PREFIX/dists/$1/$2/binary-$arch/Packages" >>"$tmp" ||
+			die "cannot read the published $1 $2 $arch index"
 		printf '\n' >>"$tmp"
 	done
 	stanzas_tsv "$tmp" >"$tmp.tsv" ||
-		die "the published $1 indexes are malformed; inspect them, then recover with switch.sh --force"
+		die "the published $1 $2 indexes are malformed; inspect them, then recover with switch.sh --force"
 	awk -F'\t' '{ print $4, $5, $6 }' "$tmp.tsv" | LC_ALL=C sort -u
 	rm -f -- "$tmp" "$tmp.tsv"
 }
 
 # reconcile_state CODENAME runs before any change to CODENAME. It proves
 # that aptly's database describes what the bucket serves, comparing package
-# sets because a Release file changes on every publication:
-#   - the bucket lists exactly the published snapshot: current; a pending
-#     marker left by a run that failed before becoming visible is dropped;
-#   - the bucket lists exactly the pending snapshot: a run published it but
-#     failed before saving, so the publication is completed;
+# sets because a Release file changes on every publication. The bucket must
+# serve exactly the configured components, and for each of them:
+#   - every component lists exactly its published snapshot: current; pending
+#     markers left by a run that failed before becoming visible are dropped;
+#   - else, with a marker present, every component lists its published or
+#     its pending snapshot: a run published them but failed before saving,
+#     so the pending snapshots are published again to complete it;
 #   - anything else (lost, older or foreign state) is refused.
 reconcile_state() {
-	local codename=$1 published pending bucket
-	published=$(published_snapshot "$codename")
-	pending=$(pending_snapshot "$codename")
+	local codename=$1 configured published_set published pending bucket c
+	local release have all_current=1 completable=1 markers=0 pubs='' pends=''
+	local -a comps=() specs=() names=()
+	local -A pend=()
+	configured=$(component_set "$(codename_components "$codename")")
+	published_set=$(published_components "$codename")
 	if ! remote_has_dist "$codename"; then
-		[[ -z $published ]] ||
-			die "aptly's database publishes $codename from $published, but the bucket has no dists/$codename"
-		rm -f -- "$(pending_file "$codename")"
+		for c in $ALL_COMPONENTS; do
+			published=$(published_snapshot "$codename" "$c")
+			[[ -z $published ]] ||
+				die "aptly's database publishes $codename from $published, but the bucket has no dists/$codename"
+		done
+		drop_pending "$codename"
 		return 0
 	fi
-	bucket=$(bucket_set "$codename")
-	if [[ -n $published && $(snapshot_set "$published") == "$bucket" ]]; then
-		rm -f -- "$(pending_file "$codename")"
+	if [[ -n $published_set && $published_set != "$configured" ]]; then
+		die "aptly's database publishes $codename with the components $published_set, but the configuration says $configured (core ADR-0059). Changing the components of a published codename is a separate migration; nothing was changed"
+	fi
+	release=$(mktemp)
+	rclone cat "r2:$APT_BUCKET/$APT_PREFIX/dists/$codename/Release" >"$release" ||
+		die "cannot read the published $codename Release"
+	have=$(release_components "$release")
+	rm -f -- "$release"
+	[[ $have == "$configured" ]] ||
+		die "the bucket's $APT_PREFIX/dists/$codename does not match aptly's database: its Release lists the components ${have:-none}, but the configuration says $configured. Inspect it, then recover with switch.sh --force"
+	IFS=, read -ra comps <<<"$(codename_components "$codename")"
+	for c in "${comps[@]}"; do
+		published=$(published_snapshot "$codename" "$c")
+		pending=$(pending_snapshot "$codename" "$c")
+		if [[ -f $(pending_file "$codename" "$c") ]]; then
+			markers=1
+		fi
+		pend[$c]=$pending
+		if ((${#comps[@]} > 1)); then
+			pubs+="${pubs:+, }$c=${published:-none}"
+			pends+="${pends:+, }$c=${pending:-none}"
+		else
+			pubs=${published:-none}
+			pends=${pending:-none}
+		fi
+		bucket=$(bucket_set "$codename" "$c")
+		if [[ -n $published && $(snapshot_set "$published") == "$bucket" ]]; then
+			continue
+		fi
+		all_current=0
+		if [[ -z $pending || $(snapshot_set "$pending") != "$bucket" ]]; then
+			completable=0
+		fi
+	done
+	if ((all_current)); then
+		drop_pending "$codename"
 		return 0
 	fi
-	if [[ -n $pending && $(snapshot_set "$pending") == "$bucket" ]]; then
-		log "completing the interrupted publication of $codename from $pending"
-		publish_snapshot "$codename" "$pending"
-		rm -f -- "$(pending_file "$codename")"
+	if ((markers && completable)); then
+		for c in "${comps[@]}"; do
+			if [[ -n ${pend[$c]} ]]; then
+				specs+=("$c=${pend[$c]}")
+				names+=("${pend[$c]}")
+			fi
+		done
+		log "completing the interrupted publication of $codename from ${names[*]}"
+		publish_snapshot "$codename" "${specs[@]}"
+		drop_pending "$codename"
 		state_save
 		return 0
 	fi
-	die "the bucket's $APT_PREFIX/dists/$codename does not match aptly's database (published: ${published:-none}, pending: ${pending:-none}); the state is lost or stale, or another writer changed the bucket. Inspect it, then recover with switch.sh --force"
+	die "the bucket's $APT_PREFIX/dists/$codename does not match aptly's database (published: $pubs, pending: $pends); the state is lost or stale, or another writer changed the bucket. Inspect it, then recover with switch.sh --force"
 }
 
 # force_overwrite=1 (switch.sh --force) lets aptly replace pool files whose
 # bucket copy differs from the local pool, repairing corrupted objects.
 force_overwrite=0
 
-# publish_snapshot CODENAME SNAPSHOT points CODENAME at SNAPSHOT: an atomic
-# switch when aptly already publishes it, otherwise a first publication.
-# Pool files are never deleted (-skip-cleanup). Callers reconcile first.
+# publish_snapshot CODENAME COMPONENT=SNAPSHOT... points the listed
+# components of CODENAME at their snapshots: one atomic switch when aptly
+# already publishes the codename (components not listed stay as they are),
+# otherwise a first publication, which needs a snapshot for every configured
+# component. Pool files are never deleted (-skip-cleanup). Callers
+# reconcile first.
 publish_snapshot() {
-	local codename=$1 snapshot=$2
-	local common=(-batch "-gpg-key=$APT_SIGNING_KEY_FPR" -skip-contents -component="$APT_COMPONENT")
+	local codename=$1 pair c i found csv
+	shift
+	local -a comps=() snaps=() ordered=() configured=()
+	local -A seen=()
+	IFS=, read -ra configured <<<"$(codename_components "$codename")"
+	for pair in "$@"; do
+		c=${pair%%=*}
+		in_csv "$c" "$(IFS=,; printf '%s' "${configured[*]}")" ||
+			die "$codename does not publish component $c"
+		[[ -z ${seen[$c]:-} ]] || die "two snapshots for $codename component $c"
+		seen[$c]=1
+		comps+=("$c")
+		snaps+=("${pair#*=}")
+	done
+	((${#comps[@]})) || die "no snapshot to publish for $codename"
+	local common=(-batch "-gpg-key=$APT_SIGNING_KEY_FPR" -skip-contents)
+	local extra=()
 	if ((force_overwrite)); then
-		common+=(-force-overwrite)
+		extra+=(-force-overwrite)
 	fi
-	if [[ -n $(published_snapshot "$codename") ]]; then
-		log "switching $codename to $snapshot"
-		aptly_ publish switch "${common[@]}" -skip-cleanup "$codename" "$APT_TARGET" "$snapshot" >&2
+	if [[ -n $(published_components "$codename") ]]; then
+		csv=$(IFS=,; printf '%s' "${comps[*]}")
+		log "switching $codename to ${snaps[*]}"
+		aptly_ publish switch "${common[@]}" "-component=$csv" "${extra[@]}" -skip-cleanup \
+			"$codename" "$APT_TARGET" "${snaps[@]}" >&2
 	else
-		log "first publication of $codename from $snapshot"
-		aptly_ publish snapshot "${common[@]}" -acquire-by-hash \
+		for c in "${configured[@]}"; do
+			found=''
+			for i in "${!comps[@]}"; do
+				if [[ ${comps[i]} == "$c" ]]; then found=${snaps[i]}; fi
+			done
+			[[ -n $found ]] || die "the first publication of $codename needs a snapshot for component $c"
+			ordered+=("$found")
+		done
+		csv=$(IFS=,; printf '%s' "${configured[*]}")
+		log "first publication of $codename from ${ordered[*]}"
+		aptly_ publish snapshot "${common[@]}" "-component=$csv" "${extra[@]}" -acquire-by-hash \
 			-distribution="$codename" \
 			-architectures="$(codename_field "$codename" 3)" \
 			-origin="$APT_ORIGIN" -label="$APT_LABEL" \
-			"$snapshot" "$APT_TARGET" >&2
+			"${ordered[@]}" "$APT_TARGET" >&2
 	fi
 }
 
-# commit_publications CODENAME=SNAPSHOT... makes the snapshots visible as
-# one recoverable transaction: record them as pending and save, publish,
-# clear the markers and save again. Repository changes made before the call
-# are saved with the markers.
+# commit_publications CODENAME/COMPONENT=SNAPSHOT... makes the snapshots
+# visible as one recoverable transaction: record them as pending and save,
+# publish each codename in one call, clear the markers and save again.
+# Repository changes made before the call are saved with the markers.
 commit_publications() {
-	local pair
-	for pair in "$@"; do
-		printf '%s\n' "${pair#*=}" >"$(pending_file "${pair%%=*}")"
+	local spec key codename component
+	local -a order=() pairs=()
+	local -A groups=()
+	for spec in "$@"; do
+		key=${spec%%=*}
+		[[ $key == */* ]] || die "invalid publication $spec (expected CODENAME/COMPONENT=SNAPSHOT)"
+		codename=${key%%/*}
+		component=${key#*/}
+		printf '%s\n' "${spec#*=}" >"$(pending_file "$codename" "$component")"
+		[[ -n ${groups[$codename]:-} ]] || order+=("$codename")
+		groups[$codename]+="$component=${spec#*=} "
 	done
 	state_save
-	for pair in "$@"; do
-		publish_snapshot "${pair%%=*}" "${pair#*=}"
+	for codename in "${order[@]}"; do
+		read -ra pairs <<<"${groups[$codename]}"
+		publish_snapshot "$codename" "${pairs[@]}"
 	done
-	for pair in "$@"; do
-		rm -f -- "$(pending_file "${pair%%=*}")"
+	for spec in "$@"; do
+		key=${spec%%=*}
+		rm -f -- "$(pending_file "${key%%/*}" "${key#*/}")"
 	done
 	state_save
 }
@@ -330,13 +561,16 @@ release_sha256() {
 	awk -v p="$2" '/^[^ ]/ { s = ($0 == "SHA256:") } s && $3 == p { print $1; found = 1 } END { exit !found }' "$1"
 }
 
-# verify_published CODENAME [--deep] [NAME=VERSION | !NAME=VERSION]...
+# verify_published CODENAME [--deep] [SPEC | !SPEC]...
 # reads the published suite back from the bucket and checks:
-#   - the InRelease signature, its codename and every index hash;
-#   - NAME=VERSION is listed and each of its files in the bucket matches
-#     its SHA256; !NAME=VERSION is not listed;
-#   - with --deep, every listed file exists in the bucket with the index's
-#     MD5 (aptly uploads each file in one part, so the ETag is the MD5).
+#   - the InRelease signature, its codename, that its Components: are the
+#     configured ones, and every index hash, for every component;
+#   - SPEC, [COMPONENT/]NAME=VERSION, is listed and each of its files in the
+#     bucket matches its SHA256; !SPEC is not listed. With a COMPONENT, only
+#     that component's indexes count; without one, any component's;
+#   - with --deep, every listed file of every component exists in the bucket
+#     with the index's MD5 (aptly uploads each file in one part, so the ETag
+#     is the MD5).
 verify_published() {
 	local codename=$1 deep=0
 	shift
@@ -344,32 +578,46 @@ verify_published() {
 		deep=1
 		shift
 	fi
-	local tmp dists arch path want got spec name version rows filename sha
+	local tmp dists arch path want got spec name version rows filename sha component c have configured
 	tmp=$(mktemp -d)
 	dists="r2:$APT_BUCKET/$APT_PREFIX/dists/$codename"
 	rclone cat "$dists/InRelease" >"$tmp/InRelease"
 	gpgv --keyring "$APT_KEYRING" --output "$tmp/Release" "$tmp/InRelease" 2>"$tmp/gpgv.log" ||
 		die "$codename InRelease is not signed by $APT_KEYRING: $(cat "$tmp/gpgv.log")"
 	grep -qx "Codename: $codename" "$tmp/Release" || die "$codename Release names the wrong codename"
+	configured=$(component_set "$(codename_components "$codename")")
+	have=$(release_components "$tmp/Release")
+	[[ $have == "$configured" ]] ||
+		die "$codename Release lists the components ${have:-none}, but the configuration says $configured"
 	: >"$tmp/stanzas.tsv"
-	for arch in $(codename_field "$codename" 3 | tr , ' '); do
-		path="$APT_COMPONENT/binary-$arch/Packages"
-		want=$(release_sha256 "$tmp/Release" "$path") || die "$codename Release does not list $path"
-		rclone cat "$dists/$path" >"$tmp/Packages-$arch"
-		got=$(sha256sum <"$tmp/Packages-$arch" | cut -d' ' -f1)
-		[[ $got == "$want" ]] || die "$codename $path does not match its Release hash"
-		stanzas_tsv "$tmp/Packages-$arch" >>"$tmp/stanzas.tsv"
+	for c in $(codename_components "$codename" | tr , ' '); do
+		for arch in $(codename_field "$codename" 3 | tr , ' '); do
+			path="$c/binary-$arch/Packages"
+			want=$(release_sha256 "$tmp/Release" "$path") || die "$codename Release does not list $path"
+			rclone cat "$dists/$path" >"$tmp/Packages-$c-$arch"
+			got=$(sha256sum <"$tmp/Packages-$c-$arch" | cut -d' ' -f1)
+			[[ $got == "$want" ]] || die "$codename $path does not match its Release hash"
+			stanzas_tsv "$tmp/Packages-$c-$arch" >"$tmp/stanzas-$c-$arch.tsv"
+			# Column 8: the component the stanza came from.
+			awk -F'\t' -v OFS='\t' -v c="$c" '{ print $0, c }' "$tmp/stanzas-$c-$arch.tsv" >>"$tmp/stanzas.tsv"
+		done
 	done
 	for spec in "$@"; do
 		name=${spec#!}
 		version=${name#*=}
 		name=${name%%=*}
-		rows=$(awk -F'\t' -v n="$name" -v v="$version" '$4 == n && $5 == v { print $1 "\t" $2 }' "$tmp/stanzas.tsv" | sort -u)
+		component=''
+		if [[ $name == */* ]]; then
+			component=${name%%/*}
+			name=${name#*/}
+		fi
+		rows=$(awk -F'\t' -v n="$name" -v v="$version" -v c="$component" \
+			'$4 == n && $5 == v && (c == "" || $8 == c) { print $1 "\t" $2 }' "$tmp/stanzas.tsv" | sort -u)
 		if [[ $spec == !* ]]; then
-			[[ -z $rows ]] || die "$codename still lists $name $version"
+			[[ -z $rows ]] || die "$codename still lists $name $version${component:+ in $component}"
 			continue
 		fi
-		[[ -n $rows ]] || die "$codename does not list $name $version"
+		[[ -n $rows ]] || die "$codename does not list $name $version${component:+ in $component}"
 		while IFS=$'\t' read -r filename sha; do
 			got=$(rclone cat "r2:$APT_BUCKET/$APT_PREFIX/$filename" | sha256sum | cut -d' ' -f1)
 			[[ $got == "$sha" ]] || die "$filename in the bucket does not match its SHA256"

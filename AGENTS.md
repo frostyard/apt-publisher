@@ -20,6 +20,13 @@ the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision.
   save, publish, clear, save). Only `switch.sh --force` skips reconciliation.
 - Rollback rebuilds the working repository from the snapshot (`rebuild_repo`);
   otherwise the next publication would restore what was rolled back.
+- A codename publishes the components in `config/codenames.tsv` (`main`, or
+  `main,image`; core ADR-0059). A package name lives in one component per
+  codename: `publish.sh` refuses a name that the other component already has.
+- `main` keeps its names: repository `frostyard-<codename>`, snapshot
+  `<codename>-<time>-<label>`, marker `txn/pending-<codename>`, and the same
+  aptly commands. Only `image` adds `-image` to them. Do not change the
+  `main` path for a main-only codename.
 - Check snapshot existence with `snapshot_exists`, not `aptly snapshot show`,
   which fails once a snapshot's source repository has been rebuilt.
 - Secrets arrive only through the environment (`R2_*`, `APT_SIGNING_KEY`,

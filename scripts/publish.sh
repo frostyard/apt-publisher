@@ -7,9 +7,14 @@
 # switches the published suite to the new snapshot as one recoverable
 # transaction, and reads the result back from the bucket.
 #
-# Prints "CODENAME SNAPSHOT" for each published codename on stdout. With
-# --report FILE, also writes "codename name version arch" rows for the
-# packages it published (the input of apt-canary.sh).
+# A producer's packages go to the one component it is registered for (main
+# or image, core ADR-0059). A codename that aptly does not publish yet is
+# first published with every configured component; the others start empty.
+#
+# Prints "CODENAME SNAPSHOT" for each published codename on stdout, the
+# snapshot being the producer's component. With --report FILE, also writes
+# "codename name version arch component" rows for the packages it published
+# (the input of apt-canary.sh).
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -47,12 +52,15 @@ require dpkg-deb
 
 patterns=$(producer_field "$producer" 2) || die "$producer is not a registered producer"
 allowed=$(producer_field "$producer" 3)
+component=$(producer_field "$producer" 6)
 codenames=${codenames:-${allowed//,/ }}
 label=${label:-${producer#*/}}
 
 for codename in $codenames; do
 	codename_field "$codename" 1 >/dev/null || die "unknown codename $codename"
 	in_csv "$codename" "$allowed" || die "$producer may not publish to $codename"
+	in_csv "$component" "$(codename_components "$codename")" ||
+		die "$codename does not publish component $component ($producer is registered for it)"
 done
 
 shopt -s nullglob
@@ -61,7 +69,7 @@ debs=("$debs_dir"/*.deb)
 
 # Route each package to its codenames: a ~debNN/+debNN version goes only to
 # the codename for Debian NN; an unmarked version goes to every target.
-declare -A files=() expect=()
+declare -A files=() expect=() names=()
 rows=()
 for deb in "${debs[@]}"; do
 	name=$(dpkg-deb -f "$deb" Package)
@@ -80,9 +88,10 @@ for deb in "${debs[@]}"; do
 		in_csv "$arch" "$(codename_field "$codename" 3)" ||
 			die "$deb has architecture $arch, which $codename does not publish"
 		files[$codename]+="$deb"$'\n'
-		expect[$codename]+="$name=$version "
-		rows+=("$codename"$'\t'"$name"$'\t'"$version"$'\t'"$arch")
-		log "route $(basename "$deb") -> $codename"
+		expect[$codename]+="$component/$name=$version "
+		names[$codename]+="$name "
+		rows+=("$codename"$'\t'"$name"$'\t'"$version"$'\t'"$arch"$'\t'"$component")
+		log "route $(basename "$deb") -> $codename/$component"
 	done
 done
 
@@ -103,12 +112,19 @@ for codename in $codenames; do
 		log "no packages for $codename"
 		continue
 	fi
-	repo=$(ensure_repo "$codename")
+	mapfile -t unique_names < <(printf '%s\n' "${names[$codename]% }" | tr ' ' '\n' | sort -u)
+	one_component_rule "$codename" "$component" "${unique_names[@]}"
+	repo=$(ensure_repo "$codename" "$component")
 	mapfile -t list <<<"${files[$codename]%$'\n'}"
 	aptly_ repo add "$repo" "${list[@]}" >&2
-	snapshots[$codename]=$(new_snapshot_name "$codename" "$label")
+	snapshots[$codename]=$(new_snapshot_name "$codename" "$component" "$label")
 	aptly_ snapshot create "${snapshots[$codename]}" from repo "$repo" >/dev/null
-	commits+=("$codename=${snapshots[$codename]}")
+	commits+=("$codename/$component=${snapshots[$codename]}")
+	others=$(first_publication_snapshots "$codename" "$label" "$component")
+	if [[ -n $others ]]; then
+		mapfile -t others_list <<<"$others"
+		commits+=("${others_list[@]}")
+	fi
 done
 
 commit_publications "${commits[@]}"
