@@ -1097,10 +1097,11 @@ check "only 1 forky image snapshot exists" \
 # shellcheck disable=SC2016 # the script expands in the child shell
 check "missing_component_snapshots fails when the publication list fails" \
 	bash -c '. "$1/scripts/lib.sh"
+		calls=$2
 		published_components() { return 1; }
-		aptly_() { printf "%s\n" "$*" >>"$2"; }
+		aptly_() { printf "%s\n" "$*" >>"$calls"; }
 		if out=$(missing_component_snapshots forky label); then exit 1; fi
-		[[ -z $out && ! -e $2 ]]' _ "$ROOT" "$tmp/mcs-aptly-calls"
+		[[ -z $out && ! -e $calls ]]' _ "$ROOT" "$tmp/mcs-aptly-calls"
 
 # A withdrawal adds the component too, in the same Release.
 scope addwithdraw
