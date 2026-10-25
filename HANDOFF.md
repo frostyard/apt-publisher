@@ -116,10 +116,14 @@ Delete it once it's stale.
   | first-setup | v0.4.1, 2026-10-04 | trixie | yes |
   | bootc-debian | `bootc-1.16.8-ostree-2026.3-202610040153`, 2026-10-04 | trixie (`~deb13`) | no (manual runs on `main`) |
   | chairlift | v0.11.2, 2026-10-04 | trixie (amd64 and arm64) | yes |
+  | omarchy-apps | `main-20261022024102-da2ea04`, 2026-10-22 | trixie (amd64) | no (pushes to `main`) |
 
   - The producer PRs were frostyard/intuneme#204, frostyard/firn#104,
     frostyard/chairlift#239, frostyard/first-setup#30 and
-    frostyard/bootc-debian#8. Registrations: #9 and #10 here.
+    frostyard/bootc-debian#8 and frostyard/omarchy-apps#2. Registrations:
+    #9, #10 and #12 here.
+  - omarchy-apps's first release went out through
+    [publish run 39712749795](https://github.com/frostyard/apt-publisher/actions/runs/39712749795).
   - The attested producers' tag-ref attestation also refuses their nightly
     `dev` prereleases, whose `1.0.0.dev` versions would sort above real
     releases.
@@ -128,7 +132,7 @@ Delete it once it's stale.
   snosi doesn't install them from APT, and their old repogen deb steps fail
   for lack of credentials. snowcat-cockpit is archived.
 - **gchlog is retired** (archived 2026-10-21). It was never registered or
-  published. The `trixie` migration needs no separate canary: seven producers
+  published. The `trixie` migration needs no separate canary: eight producers
   publish to it.
 - **snosi image builds are blocked by Debian, not by Frostyard.**
   - Since 2026-10-03 20:20 UTC, every 6.18+ trixie-backports kernel is
@@ -140,8 +144,12 @@ Delete it once it's stale.
 - **CDN cache rules are in place** (Plan 0009 Phase 3, done 2026-10-03):
   `/debian/pool/` and `by-hash` are cached at the edge; the indexes and
   errors are not. See "The CDN" below.
-- **Next:** forky (Plan 0009 Phase 6) and the audit (Phase 7). See "Next
-  steps" below.
+- **The audit passes.** A manual
+  [audit run 40156591706](https://github.com/frostyard/apt-publisher/actions/runs/40156591706)
+  on 2026-10-25 found every `.deb` of all eight producers' latest releases.
+  The nightly schedule still skips until `APT_AUDIT_ENABLED` is `true`.
+- **Next:** set `APT_AUDIT_ENABLED=true` (Plan 0009 Phase 7, a repository
+  setting for an admin), then forky (Phase 6). See "Next steps" below.
 
 ## Why this exists
 
@@ -339,8 +347,9 @@ it doesn't carry.
     or a tag pattern, not only `--source-ref refs/tags/<tag>`.
     firn's and updex's release workflows run on any tag, and their tag
     rulesets protect only `v*`.
-- **Phase 7, audit.** Set the repository variable `APT_AUDIT_ENABLED=true`
-  once producers publish through apt-publisher.
+- **Phase 7, audit.** All eight producers publish through apt-publisher, and
+  a manual audit run passed on 2026-10-25. Set the repository variable:
+  `gh variable set APT_AUDIT_ENABLED --repo frostyard/apt-publisher --body true`.
 - **Visibility (optional).** The org is on the Team plan, so the
   `apt-repository` environment's branch rule works on a private repo.
   Going public is a preference:
