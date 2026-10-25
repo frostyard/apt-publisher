@@ -286,6 +286,60 @@ first_publication_snapshots() {
 	done
 }
 
+# repo_exists REPO reports whether aptly has a local repository of that name.
+# The list is read in full (see snapshot_exists), and a failure is fatal: it
+# is never read as "no repository".
+repo_exists() {
+	local list
+	list=$(aptly_ repo list -raw) || die "cannot list aptly repositories"
+	grep -qxF -- "$1" <<<"$list"
+}
+
+# has_package repo|snapshot NAME PACKAGE: does the repository or snapshot hold
+# a package of that name, in any version? "No results" means no; any other
+# aptly error is fatal.
+has_package() {
+	local out
+	if out=$(aptly_ "$1" search -format='{{.Package}}' "$2" "$3" 2>&1); then
+		return 0
+	fi
+	[[ $out == *"no results"* ]] && return 1
+	die "cannot search $1 $2 for $3: $out"
+}
+
+# one_component_rule CODENAME COMPONENT NAME... refuses a package name that
+# CODENAME already has in a component other than COMPONENT, in that
+# component's working repository or in its published snapshot (core
+# ADR-0059). Callers run it after reconcile_state and before adding packages.
+one_component_rule() {
+	local codename=$1 component=$2 other repo published name
+	shift 2
+	for other in $(codename_components "$codename" | tr , ' '); do
+		[[ $other != "$component" ]] || continue
+		repo=$(repo_name "$codename" "$other")
+		published=$(published_snapshot "$codename" "$other")
+		for name in "$@"; do
+			if repo_exists "$repo" && has_package repo "$repo" "$name"; then
+				die "$codename already publishes $name in component $other"
+			fi
+			if [[ -n $published ]] && has_package snapshot "$published" "$name"; then
+				die "$codename already publishes $name in component $other"
+			fi
+		done
+	done
+}
+
+# snapshot_names SNAPSHOT prints the package names in SNAPSHOT, sorted and
+# unique. An empty snapshot gives nothing; any other aptly error is fatal.
+snapshot_names() {
+	local out
+	if ! out=$(aptly_ snapshot search -format='{{.Package}}' "$1" 2>&1); then
+		[[ $out == *"no results"* ]] || die "cannot search snapshot $1: $out"
+		return 0
+	fi
+	LC_ALL=C sort -u <<<"$out"
+}
+
 # published_snapshot CODENAME COMPONENT prints the snapshot aptly's database
 # says the component is published from, or nothing.
 published_snapshot() {

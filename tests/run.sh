@@ -105,6 +105,7 @@ cp "$tmp/producers.tsv" "$tmp/producers-image.tsv"
 cat >>"$tmp/producers-image.tsv" <<'EOF'
 frostyard/image-only	imgpkg	trixie,forky	no	-	image
 frostyard/bootc-image	bootc,libostree-1-1	trixie,forky	no	-	image
+frostyard/docs-image	docs-thing	trixie,forky	no	-	image
 EOF
 # Codenames that publish both components. The committed file is main-only.
 printf 'trixie\t13\tamd64,arm64,all\tmain,image\nforky\t14\tamd64,arm64,all\tmain,image\n' >"$tmp/codenames-image.tsv"
@@ -265,7 +266,17 @@ while IFS= read -r line; do
 	sleep 0.01
 done < <("$real_aptly" "\$@")
 EOF
-chmod +x "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh" "$tmp/shim-aptly/aptly"
+# aptly whose repository list fails.
+mkdir -p "$tmp/shim-repolist"
+cat >"$tmp/shim-repolist/aptly" <<EOF
+#!/usr/bin/env bash
+if [[ " \$* " == *" repo list "* ]]; then
+	echo "ERROR: simulated repository list failure" >&2
+	exit 1
+fi
+exec "$real_aptly" "\$@"
+EOF
+chmod +x "$tmp/shim-repolist/aptly" "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh" "$tmp/shim-aptly/aptly"
 mkdir -p "$tmp/gh"
 
 # --- dry run ------------------------------------------------------------------
@@ -837,6 +848,51 @@ for arch in amd64 arm64 all; do
 	done
 done
 check "purge lists main first" test "$(sed -n 4p "$tmp/purge.txt")" = "$APT_PUBLIC_URL/dists/trixie/main/binary-amd64/Packages"
+
+# The import obeys the one-component rule.
+scope importrule
+mkdeb "$tmp/ir-docs" docs-thing 0.9 amd64
+must_pass "publish docs-thing to image" run publish.sh --producer frostyard/docs-image --debs "$tmp/ir-docs" --codenames trixie
+irule=(--codename trixie --base-url "file://$tmp/legacy" --work "$tmp/import-rule-work")
+must_pass "review the legacy suite for a codename with image" run import-stable.sh "${irule[@]}" --download-only
+manifest=$(cat "$tmp/out")
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "an import cannot bring a name into main that image has" \
+	"trixie already publishes docs-thing in component image" \
+	run import-stable.sh "${irule[@]}" --expect-manifest "$manifest"
+check "the refused import left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refused import left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+
+# A rollback cannot publish one name in two components.
+scope overlap
+mkdeb "$tmp/ov-bootc" bootc '1.0-1~deb13' amd64
+must_pass "publish bootc to main" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/ov-bootc"
+ov_main_old=$(cut -d' ' -f2 "$tmp/out")
+must_pass "withdraw bootc from main" run withdraw.sh --codename trixie --package bootc --version '1.0-1~deb13'
+ov_main_new=$(cut -d' ' -f2 "$tmp/out")
+must_pass "publish bootc to image" run publish.sh --producer frostyard/bootc-image --debs "$tmp/ov-bootc"
+ov_image=$(cut -d' ' -f2 "$tmp/out")
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "rollback refuses snapshots that publish one name in two components" "bootc in more than one component" \
+	run switch.sh --codename trixie --snapshot "$ov_main_old" --snapshot "$ov_image"
+must_fail "rollback --force refuses them too" "bootc in more than one component" \
+	run switch.sh --codename trixie --snapshot "$ov_main_old" --snapshot "$ov_image" --force
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+must_pass "rollback to snapshots with disjoint names works" \
+	run switch.sh --codename trixie --snapshot "$ov_main_new" --snapshot "$ov_image"
+
+# A failing repository list is an error, not "no repository".
+mkdeb "$tmp/ov-img" imgpkg 1.0 amd64
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "a failing repository list stops a publication" "cannot list aptly repositories" \
+	env PATH="$tmp/shim-repolist:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/image-only --debs "$tmp/ov-img" --codenames trixie
+check "the failed publication left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the failed publication left the state bucket unchanged" test "$(state_sum)" = "$state_before"
 
 # A bucket that publishes main only, while the configuration says main,image,
 # is refused before any change.

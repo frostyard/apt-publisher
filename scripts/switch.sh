@@ -83,6 +83,14 @@ aptly_init
 for snapshot in "${snapshots[@]}"; do
 	snapshot_exists "$snapshot" || die "no snapshot named $snapshot"
 done
+# One package name belongs in one component (core ADR-0059): the selected
+# snapshots must not share a name, with or without --force. Nothing has
+# changed yet.
+if ((${#snapshots[@]} > 1)); then
+	overlap=$(for component in ${configured//,/ }; do snapshot_names "${by_component[$component]}"; done |
+		LC_ALL=C sort | uniq -d)
+	[[ -z $overlap ]] || die "the snapshots publish ${overlap//$'\n'/ } in more than one component; pick snapshots that keep one name in one component"
+fi
 if ((force)); then
 	log "warning: --force: not reconciling $codename with the bucket; overwriting differing pool files"
 	drop_pending "$codename"

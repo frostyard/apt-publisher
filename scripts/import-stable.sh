@@ -115,6 +115,8 @@ fi
 
 aptly_init
 reconcile_state "$codename"
+mapfile -t names < <(cut -f4 "$work/manifest.tsv" | LC_ALL=C sort -u)
+one_component_rule "$codename" main "${names[@]}"
 repo=$(ensure_repo "$codename" main)
 # Only the verified files: the work directory may hold leftovers.
 mapfile -t paths < <(awk -F'\t' -v w="$work" '{ print w "/" $1 }' "$work/manifest.tsv")

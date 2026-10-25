@@ -105,39 +105,6 @@ for codename in "${!files[@]}"; do
 	reconcile_state "$codename"
 done
 
-# one_component_rule CODENAME NAME... refuses a package name that CODENAME
-# already has in another component, in that component's working repository
-# or in its published snapshot (core ADR-0059). "No results" is fine; any
-# other aptly error is fatal.
-one_component_rule() {
-	local codename=$1 other repo published name
-	shift
-	for other in $(codename_components "$codename" | tr , ' '); do
-		[[ $other != "$component" ]] || continue
-		repo=$(repo_name "$codename" "$other")
-		published=$(published_snapshot "$codename" "$other")
-		for name in "$@"; do
-			if aptly_ repo show "$repo" >/dev/null 2>&1 && has_package repo "$repo" "$name"; then
-				die "$codename already publishes $name in component $other"
-			fi
-			if [[ -n $published ]] && has_package snapshot "$published" "$name"; then
-				die "$codename already publishes $name in component $other"
-			fi
-		done
-	done
-}
-
-# has_package repo|snapshot NAME PACKAGE: does the repository or snapshot hold
-# a package of that name, in any version?
-has_package() {
-	local out
-	if out=$(aptly_ "$1" search -format='{{.Package}}' "$2" "$3" 2>&1); then
-		return 0
-	fi
-	[[ $out == *"no results"* ]] && return 1
-	die "cannot search $1 $2 for $3: $out"
-}
-
 declare -A snapshots=()
 commits=()
 for codename in $codenames; do
@@ -146,7 +113,7 @@ for codename in $codenames; do
 		continue
 	fi
 	mapfile -t unique_names < <(printf '%s\n' "${names[$codename]% }" | tr ' ' '\n' | sort -u)
-	one_component_rule "$codename" "${unique_names[@]}"
+	one_component_rule "$codename" "$component" "${unique_names[@]}"
 	repo=$(ensure_repo "$codename" "$component")
 	mapfile -t list <<<"${files[$codename]%$'\n'}"
 	aptly_ repo add "$repo" "${list[@]}" >&2
