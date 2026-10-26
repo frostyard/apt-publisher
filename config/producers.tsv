@@ -23,7 +23,9 @@ frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	tri
 # Static Go, attested from v* tags; registering attested=yes also refuses the
 # unattested nightly `dev` prerelease, whose 1.0.0.dev version sorts above releases.
 frostyard/intuneme	frostyard-intuneme	trixie,forky	yes	frostyard/snosi	main
-frostyard/firn	frostyard-firn	trixie,forky	yes	frostyard/snosi	main
+# Static Go. frostyard-firn-gui (firn ADR-0021) loads GTK 3, Pango and Cairo
+# with dlopen and declares no Depends; trixie and forky ship the same sonames.
+frostyard/firn	frostyard-firn,frostyard-firn-gui	trixie,forky	yes	frostyard/snosi	main
 # GTK4/libadwaita are loaded at runtime (puregotk, no Depends): trixie until a
 # forky smoke test passes.
 frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	yes	frostyard/snosi	main
