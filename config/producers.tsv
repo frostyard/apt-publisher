@@ -10,8 +10,10 @@
 #             successful publish, or - for none.
 # component   main or image: the one component this producer's packages go to
 #             (core ADR-0059). Every codename it lists must publish that
-#             component. image is for builds that replace a Debian package;
-#             every producer is main until a later change moves some.
+#             component. image is for builds that replace a Debian package of
+#             the same name, or depend on such a build. Changing a producer's
+#             component needs the move workflow (move.yml) right after the
+#             merge: until it runs, the producer's publications fail closed.
 #
 # Add a producer only after confirming the package names it ships.
 frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
@@ -19,7 +21,10 @@ frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
 # would route to every target: trixie only until they carry ~deb13/~deb14.
 # Not attested: it releases from pushes to stable, so its provenance names
 # refs/heads/stable rather than the release tag that fetch-release.sh checks.
-frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	main
+# image (core ADR-0059 step 5): Debian 13 ships incus, incus-base,
+# incus-client and incus-extra (trixie-security), and the 1: epoch makes these
+# builds replace them; incus-ui-canonical goes with them, one producer.
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	image
 # Static Go, attested from v* tags; registering attested=yes also refuses the
 # unattested nightly `dev` prerelease, whose 1.0.0.dev version sorts above releases.
 frostyard/intuneme	frostyard-intuneme	trixie,forky	yes	frostyard/snosi	main
@@ -37,7 +42,9 @@ frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi	main
 # keep it from shadowing Debian's other libostree packages.
 # Not attested: it releases from manual workflow_dispatch runs on main, so its
 # provenance names refs/heads/main rather than the release tag.
-frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi	main
+# image (core ADR-0059 step 5): this libostree-1-1 replaces Debian's, and
+# bootc links against it.
+frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi	image
 # Omarchy apps for snosi's flurry desktop and its moonlight and voxtype sysexts.
 # Exact names: gpu-screen-recorder is also a Debian package (forky, sid).
 # Built in debian:trixie against trixie's libraries without a ~deb13 marker, so

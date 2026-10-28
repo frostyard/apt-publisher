@@ -192,9 +192,12 @@ How it works:
   name in a component other than its producer's registered one (see
   [Moving packages between components](#moving-packages-between-components)).
 
-`trixie` and `forky` publish `main,image`. Every producer is still `main`,
-and no producer moves in this change: ADR-0059 step 5 moves bootc-debian and
-incus to `image` later, with the move workflow below.
+`trixie` and `forky` publish `main,image`. frostyard/bootc-debian (`bootc`,
+`libostree-1-1`) and frostyard/incus (`incus`, `incus-base`, `incus-client`,
+`incus-extra`, `incus-ui-canonical`) are registered for `image` (ADR-0059
+step 5): their builds replace Debian packages of the same name. Every other
+producer is `main`. The versions they published to `main` before the
+registration move with the move workflow below.
 
 The live codenames published `main` only. The first publication run after
 this change adds each missing configured component to them, empty: it writes
