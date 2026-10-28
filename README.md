@@ -222,17 +222,34 @@ When a producer's registration changes component, the **move** workflow
   cache and runs the canary on the newest moved version of each package.
 - **A move that dies is settled by the next run.** A move changes two
   components and saves its repositories before it publishes, so it writes a
-  move marker first (`txn/move-CODENAME`, one `component snapshot` line per
-  changed component) and removes it after it. The next run of any script
-  reconciles first. If the move became visible, it completes it and drops
-  the marker. If it never became visible, it undoes it: it rebuilds the
-  changed working repositories from the published snapshots, drops the
-  marker, and logs that an interrupted move was undone. Run the move again.
+  move marker first (`txn/move-CODENAME`) and saves it **before it moves any
+  repository**. The marker holds one `component snapshot` line per changed
+  component, with the names the new snapshots will get, and one
+  `row NAME VERSION ARCH FROM TO` line per moved package. It is removed only
+  after the deep read-back passes. The next run of any script reconciles
+  first:
+  - If the move became visible, it completes it and drops the marker.
+  - If the marker's snapshots are not published (they may not even exist),
+    it undoes the move: it rebuilds the changed working repositories from the
+    published snapshots, drops the marker, and logs that an interrupted move
+    was undone. Run the move again.
   Without this, a publication that waited in the queue would switch one
   component only and strand the move in the other: the names would leave
   `main` and never reach `image`. `switch.sh --list` prints a marker as
   `move pending: CODENAME component=snapshot ...`, and `switch.sh --force`
   drops it.
+- **A retry of a recovered move is not silent.** When the reconciliation of a
+  `move.sh` run completes an earlier move, that run reads it back with the
+  deep check, prints its codename and writes its report rows, so the
+  workflow purges the CDN cache and runs the canary.
+- **If a step after Move fails, or a retry is green with nothing to move, run
+  the workflow with `recheck=true`** (and `dry_run=false`). `move.sh
+  --recheck` changes nothing and needs no signing key: it runs the deep
+  read-back, prints each published codename with its snapshots, and reports
+  the newest version of each package in `image`. The workflow then purges the
+  cache and runs the canary. A dry run and a recheck cannot be combined.
+- A missing or unreadable `config/producers.tsv` is an error: the move and the
+  rollback guard fail closed instead of reading it as "no registered producer".
 - It starts from what the bucket serves: a working repository that differs
   from its published snapshot is refused. `--rebuild` rebuilds it from the
   published snapshot after a run that died between saving and publishing.
