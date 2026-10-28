@@ -435,4 +435,5 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
   [ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md)
   records the organization decision.
   [ADR-0001](docs/adr/0001-aptly-single-writer.md) records this repository's
-  side.
+  side, and [ADR-0002](docs/adr/0002-two-components-per-codename.md) its
+  two components per codename (core ADR-0059).
