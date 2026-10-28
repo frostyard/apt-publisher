@@ -86,10 +86,17 @@ component differs from its producer's registration:
   rebuilds both working repositories from their published snapshots.
   `switch.sh --force` drops it. A later publication
   switches one component only, so it must never find a move half applied. A
-  rerun of the move that finds its earlier move completed still reads it
-  back, purges the CDN and runs the canary, and the marker is removed only
-  after the deep read-back passes. A read-only recheck repeats the read-back,
-  the purge and the canary after any later failure;
+  rerun of the move that finds its earlier move completed in its own
+  reconciliation still reads it back, purges the CDN and runs the canary. A
+  move run removes its marker only after its deep read-back passes, but the
+  reconciliation of another run (a publication) can drop the marker of a
+  visible move earlier, without that read-back: an absent marker does not
+  prove that the read-back, the purge or the canary of a move passed;
+- a read-only recheck verifies the current publication of each codename (its
+  signature, index hashes and every pool file's MD5), then the workflow purges
+  the CDN and runs the canary on the newest versions in the components other
+  than `main`. It does not replay a move's own per-version assertions, and
+  after a move back to `main` its canary covers none of the moved packages;
 - it reads every moved version back in its new component, checks that the
   old component no longer lists it, checks every pool file's MD5, purges the
   CDN, and runs the apt canary on the newest version of each name and
