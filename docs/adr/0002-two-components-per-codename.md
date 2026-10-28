@@ -47,11 +47,15 @@ snapshots and pending marker. `main` keeps the names it had before
 `txn/pending-<codename>`), so a main-only codename runs the same aptly
 commands as before. `image` adds `-image` to each name.
 
-**Transactions.** Every path that publishes reconciles first and goes through
+**Transactions.** Every normal publishing path (publish, withdraw,
+rollback, import, move) reconciles first and goes through
 `commit_publications`: pending markers for every component it changes, save,
-one aptly call per codename (one signed `Release`), clear, save.
+one signed `Release` update per codename (one `publish switch`, or for an
+added component `publish source add` and `publish update`), clear, save.
 `reconcile_state` compares the package set of every component with aptly's
-database, and completes an interrupted publication of any component.
+database. It completes an interrupted publication of any component itself,
+from the saved pending markers. `switch.sh --force` is the operator's
+recovery: it skips reconciliation and drops the markers.
 
 **Adding and removing a component.** A configured component that a published
 codename lacks is added empty by the next publication run, also by a publish
@@ -76,9 +80,11 @@ component differs from its producer's registration:
 - it publishes both components of a codename in one `Release`, as one
   recoverable transaction;
 - it saves a move marker (the new snapshot names and the moved versions)
-  before it changes any working repository. The next run of any script drops
-  the marker when the move became visible, and otherwise rebuilds both
-  working repositories from their published snapshots. A later publication
+  before it changes any working repository. The next run that reconciles
+  that codename (a publication, withdrawal, rollback, import or move that
+  targets it) drops the marker when the move became visible, and otherwise
+  rebuilds both working repositories from their published snapshots.
+  `switch.sh --force` drops it. A later publication
   switches one component only, so it must never find a move half applied. A
   rerun of the move that finds its earlier move completed still reads it
   back, purges the CDN and runs the canary;
@@ -123,8 +129,12 @@ them against their `Release` hashes; it does not verify Debian's signature.
   day later. It does not report a package that depends on a Frostyard
   replacement of a Debian package (ADR-0059's second criterion for `image`):
   that stays a review duty for registrations.
-- The nightly audit needs Debian's mirrors. A mirror failure fails the audit;
-  it never reads as "no Debian names".
+- The nightly audit needs Debian's mirrors. A fetch error other than a 404,
+  a malformed `Release` or index, or a hash mismatch fails the audit; it
+  never reads as "no Debian names". A suite whose `Release` returns 404 is
+  taken as absent and skipped, because Debian adds and drops suites over a
+  release's life. So a wrong mirror path that returns 404 reads as absent;
+  the audit logs every skipped suite.
 
 ## Alternatives considered
 
