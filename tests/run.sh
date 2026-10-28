@@ -893,8 +893,13 @@ must_fail "rollback --force refuses them too" "bootc in more than one component"
 	run switch.sh --codename trixie --snapshot "$ov_main_old" --snapshot "$ov_image" --force
 check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
 check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+# The rollback guard reads the registrations (core ADR-0059), and
+# producers-image.tsv registers bootc for both components, which it refuses.
+# This rollback runs with bootc registered for image only.
+printf 'frostyard/bootc-image\tbootc\ttrixie,forky\tno\t-\timage\n' >"$tmp/producers-overlap.tsv"
 must_pass "rollback to snapshots with disjoint names works" \
-	run switch.sh --codename trixie --snapshot "$ov_main_new" --snapshot "$ov_image"
+	env APT_PRODUCERS_FILE="$tmp/producers-overlap.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/switch.sh" --codename trixie --snapshot "$ov_main_new" --snapshot "$ov_image"
 
 # A failing repository list is an error, not "no repository".
 mkdeb "$tmp/ov-img" imgpkg 1.0 amd64
@@ -1192,6 +1197,238 @@ check "the audit does not look in main for an image producer" \
 	grep -qx 'MISSING frostyard/image-only v1.2 frostyard-updex_3.1.0_amd64.deb' "$tmp/out"
 
 # The secrets check reads no codename list, so the committed default is fine.
+unset APT_CODENAMES_FILE
+export APT_PRODUCERS_FILE=$tmp/producers.tsv
+
+# --- the move between components (core ADR-0059) ---------------------------------
+#
+# move.sh moves every published package to the component its producer is
+# registered for, in one publication per codename. The scopes here use their
+# own producers files: "main" registers bootc-debian for main, "image" for
+# image, and "image" has no producer for trixie-thing, which therefore stays
+# where it is.
+
+printf 'frostyard/updex\tfrostyard-updex\ttrixie,forky\tyes\t-\tmain\nfrostyard/bootc-debian\tbootc,libostree-1-1\ttrixie\tno\t-\tmain\nfrostyard/trixie-only\ttrixie-thing\ttrixie\tno\t-\tmain\n' \
+	>"$tmp/producers-move-main.tsv"
+printf 'frostyard/updex\tfrostyard-updex\ttrixie,forky\tyes\t-\tmain\nfrostyard/bootc-debian\tbootc,libostree-1-1\ttrixie\tno\t-\timage\n' \
+	>"$tmp/producers-move-image.tsv"
+export APT_CODENAMES_FILE=$tmp/codenames-image.tsv
+
+# registered_component reads the registrations of the producers file.
+# shellcheck disable=SC2016 # the script runs in the child shell
+registered() { env APT_PRODUCERS_FILE="$1" bash -c '. "$1/scripts/lib.sh"; registered_component "$2"' _ "$ROOT" "$2"; }
+must_pass "registered_component prints an image registration" registered "$tmp/producers-move-image.tsv" libostree-1-1
+check "it prints image" test "$(cat "$tmp/out")" = image
+must_pass "registered_component matches the globs" registered "$tmp/producers-image.tsv" libostree-1-1x
+check "it prints main for a glob registration" test "$(cat "$tmp/out")" = main
+check "it prints nothing when no producer matches" test -z "$(registered "$tmp/producers-move-image.tsv" unrelated-package)"
+must_fail "producers that register one name for different components are refused" \
+	"register bootc for different components" registered "$tmp/producers-image.tsv" bootc
+
+# mv_publish PRODUCER NAME VERSION ARCH... publishes one deb per architecture.
+mv_publish() {
+	local producer=$1 name=$2 version=$3 d
+	export APT_PRODUCERS_FILE=$tmp/producers-move-main.tsv
+	d=$(mktemp -d "$tmp/mv.XXXXXX")
+	shift 3
+	for arch in "$@"; do mkdeb "$d" "$name" "$version" "$arch"; done
+	must_pass "publish $name $version ($*) as $producer" run publish.sh --producer "$producer" --debs "$d" --codenames trixie
+}
+# mv_setup publishes the packages the move starts from, with main producers.
+mv_setup() {
+	export APT_PRODUCERS_FILE=$tmp/producers-move-main.tsv
+	mv_publish frostyard/bootc-debian libostree-1-1 '2026.3-1~deb13' amd64 arm64
+	mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64 arm64
+	mv_publish frostyard/bootc-debian bootc '1.10-1~deb13' amd64
+	mv_publish frostyard/bootc-debian bootc '1:0.5-1~deb13' amd64
+	mv_publish frostyard/trixie-only trixie-thing 1.0 amd64
+	mv_publish frostyard/updex frostyard-updex 1.0 amd64
+}
+
+scope move
+export SHIM_STATE_PATH=move
+mv_setup
+pre_main=$(cut -d' ' -f2 "$tmp/out")
+run switch.sh --list >"$tmp/list" 2>&1
+pre_image=$(grep -oE "trixie-image-$snapshot_re-[A-Za-z0-9._-]+" "$tmp/list" | sort -u | sed -n 1p)
+check "the setup left a main snapshot and an empty image snapshot" test -n "$pre_main" -a -n "$pre_image"
+check "bootc is in main" listed_in trixie main bootc '1:0.5-1~deb13' amd64
+cand_bootc=$(candidate trixie amd64 bootc main)
+cand_ostree=$(candidate trixie arm64 libostree-1-1 main)
+check "apt's candidates before the move are the newest versions" \
+	test "$cand_bootc $cand_ostree" = '1:0.5-1~deb13 2026.3-1~deb13'
+
+# Registering bootc-debian for image makes a publication of bootc fail closed
+# on the one-component rule, until the move has run.
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+mkdeb "$tmp/mv-new" bootc '1.3-1~deb13' amd64
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "after the registration, a bootc publication fails on the one-component rule" \
+	"trixie already publishes bootc in component main" \
+	run publish.sh --producer frostyard/bootc-debian --debs "$tmp/mv-new"
+check "the failed publication left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# Dry run: the plan, and no change.
+must_pass "a dry run succeeds" run move.sh --dry-run
+check "the plan lists every moved version of bootc and libostree-1-1" test "$(grep -c '^move ' "$tmp/err")" = 6
+check "a plan line names codename, package, version, arch and components" \
+	grep -qxF 'move trixie bootc 1:0.5-1~deb13 amd64 main -> image' "$tmp/err"
+check "the plan covers the other architecture" grep -qxF 'move trixie libostree-1-1 2026.3-1~deb13 arm64 main -> image' "$tmp/err"
+check "a package without a producer stays" grep -qF 'trixie-thing has no registered producer and stays in main' "$tmp/err"
+check "a codename without packages has nothing to move" grep -qxF 'nothing to move in forky' "$tmp/err"
+check "the dry run prints nothing on stdout" test ! -s "$tmp/out"
+check "the dry run left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the dry run left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+check "the dry run left main listing bootc" listed_in trixie main bootc '1.2-1~deb13' arm64
+
+# The move.
+moved_pairs=('bootc 1.2-1~deb13 amd64' 'bootc 1.2-1~deb13 arm64' 'bootc 1.10-1~deb13 amd64' 'bootc 1:0.5-1~deb13 amd64'
+	'libostree-1-1 2026.3-1~deb13 amd64' 'libostree-1-1 2026.3-1~deb13 arm64')
+must_pass "the move succeeds" run move.sh --report "$tmp/mv-report.tsv"
+check "the move reported its plan" test "$(grep -c '^move ' "$tmp/err")" = 6
+check "stdout names the codename and one snapshot for each changed component" \
+	matches "^trixie trixie-$snapshot_re-move trixie-image-$snapshot_re-move\$" "$(cat "$tmp/out")"
+mv_main=$(cut -d' ' -f2 "$tmp/out")
+mv_image=$(cut -d' ' -f3 "$tmp/out")
+check "the Release lists both components" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+for pair in "${moved_pairs[@]}"; do
+	read -r name version arch <<<"$pair"
+	check "main no longer lists $name $version $arch" not_listed_in trixie main "$name" "$version" "$arch"
+	check "image lists $name $version $arch" listed_in trixie image "$name" "$version" "$arch"
+	check "the main pool file of $name $version $arch stays" test -n "$(find "$pub/pool/main" -name "${name}_${version#*:}_${arch}.deb")"
+	check "the image pool file of $name $version $arch exists" test -n "$(find "$pub/pool/image" -name "${name}_${version#*:}_${arch}.deb")"
+done
+check "an unrelated main package stays in main" listed_in trixie main frostyard-updex 1.0
+check "a package without a producer stays in main" listed_in trixie main trixie-thing 1.0
+check "image lists no unrelated package" not_listed_in trixie image frostyard-updex 1.0
+check "apt with main and image gives the same bootc candidate as before" \
+	test "$(candidate trixie amd64 bootc 'main image')" = "$cand_bootc"
+check "apt with main and image gives the same libostree-1-1 candidate as before" \
+	test "$(candidate trixie arm64 libostree-1-1 'main image')" = "$cand_ostree"
+check "apt with main alone has no bootc candidate" candidate_is trixie amd64 bootc '' main
+check "the report keeps the newest version of each package and architecture only" \
+	test "$(cat "$tmp/mv-report.tsv")" = "$(printf 'trixie\tbootc\t1.2-1~deb13\tarm64\timage\ntrixie\tbootc\t1:0.5-1~deb13\tamd64\timage\ntrixie\tlibostree-1-1\t2026.3-1~deb13\tamd64\timage\ntrixie\tlibostree-1-1\t2026.3-1~deb13\tarm64\timage\n')"
+must_pass "no pending marker is left" run switch.sh --list
+check "switch --list shows no pending marker" test "$(grep -c '^pending:' "$tmp/out" || true)" = 0
+must_pass "the move's suite passes the deep check" \
+	run verify.sh trixie --deep image/bootc=1:0.5-1~deb13 '!main/bootc=1:0.5-1~deb13' image/libostree-1-1=2026.3-1~deb13 main/frostyard-updex=1.0
+must_pass "the canary installs the reported packages from image" run apt-canary.sh --report "$tmp/mv-report.tsv"
+
+# A second run is a no-op.
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_pass "a second move succeeds" run move.sh
+check "it has nothing to move" grep -qxF 'nothing to move in trixie' "$tmp/err"
+check "it prints nothing on stdout" test ! -s "$tmp/out"
+check "it left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "it left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+must_pass "a move of one codename also accepts --codename" run move.sh --codename trixie --report "$tmp/mv-report2.tsv"
+check "an empty move writes an empty report" test -f "$tmp/mv-report2.tsv" -a ! -s "$tmp/mv-report2.tsv"
+must_fail "an unknown codename is refused" "unknown codename sid" run move.sh --codename sid
+
+# After the move, bootc publishes into image.
+mkdeb "$tmp/mv-new" bootc '1.3-1~deb13' amd64
+must_pass "a new bootc version publishes into image" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/mv-new"
+check "image lists it" listed_in trixie image bootc '1.3-1~deb13' amd64
+check "main does not" not_listed_in trixie main bootc '1.3-1~deb13'
+check "image keeps the moved versions" listed_in trixie image bootc '1.2-1~deb13' arm64
+
+# A snapshot taken before the move is not a rollback target.
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "a rollback to the pre-move snapshots is refused" \
+	"$pre_main puts bootc in main, but its producer is registered for image; a snapshot taken before a move is not a rollback target" \
+	run switch.sh --codename trixie --snapshot "$pre_main" --snapshot "$pre_image"
+check "the refusal names the forward change" grep -q 'revert a move by a forward change (registration plus move.sh)' "$tmp/err"
+must_fail "--force does not skip the refusal" "a snapshot taken before a move is not a rollback target" \
+	run switch.sh --codename trixie --snapshot "$pre_main" --snapshot "$pre_image" --force
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+# A snapshot taken by the move itself is a fine target.
+must_pass "a rollback to the move's snapshots is accepted" \
+	run switch.sh --codename trixie --snapshot "$mv_main" --snapshot "$mv_image"
+check "it unpublished the later bootc version" not_listed_in trixie image bootc '1.3-1~deb13'
+check "it kept the moved ones in image" listed_in trixie image bootc '1:0.5-1~deb13' amd64
+
+# A move interrupted after it became visible is completed by the next run's
+# reconciliation, and a registration back to main moves the names back.
+scope moveint
+export SHIM_STATE_PATH=moveint
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64 arm64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+rm -f -- "$tmp/shim-rclone/count"
+must_fail "a move interrupted after it became visible fails" "simulated failure" \
+	env SHIM_FAIL_AT=2 PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the interrupted move is visible in image" listed_in trixie image bootc '1.2-1~deb13' arm64
+check "and gone from main" not_listed_in trixie main bootc '1.2-1~deb13' arm64
+must_pass "the next run completes it" run move.sh
+check "the next run reported the completion" grep -q 'completing the interrupted publication of trixie' "$tmp/err"
+check "and has nothing left to move" grep -qxF 'nothing to move in trixie' "$tmp/err"
+must_pass "the completed suite verifies" run verify.sh trixie --deep image/bootc=1.2-1~deb13 '!main/bootc=1.2-1~deb13'
+must_pass "no pending marker remains" run switch.sh --list
+check "switch --list shows none" test "$(grep -c '^pending:' "$tmp/out" || true)" = 0
+
+export APT_PRODUCERS_FILE=$tmp/producers-move-main.tsv
+must_pass "dry run of the reverse move" run move.sh --dry-run
+check "the plan moves image to main" grep -qxF 'move trixie bootc 1.2-1~deb13 arm64 image -> main' "$tmp/err"
+must_pass "a registration back to main moves the names back" run move.sh --report "$tmp/mv-back.tsv"
+check "main lists bootc again" listed_in trixie main bootc '1.2-1~deb13' amd64
+check "image no longer lists it" not_listed_in trixie image bootc '1.2-1~deb13'
+check "the reverse move reports it" grep -qxP 'trixie\tbootc\t1.2-1~deb13\tarm64\tmain' "$tmp/mv-back.tsv"
+check "the files stay in both pools" test -n "$(find "$pub/pool/main" -name bootc_1.2-1~deb13_arm64.deb)" -a \
+	-n "$(find "$pub/pool/image" -name bootc_1.2-1~deb13_arm64.deb)"
+must_pass "main publishes bootc again" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/mv-new"
+
+# A working repository that differs from its published snapshot is refused:
+# a move that died after it saved its repositories, before it published.
+mkdir -p "$tmp/shim-noswitch"
+cat >"$tmp/shim-noswitch/aptly" <<EOF
+#!/usr/bin/env bash
+if [[ " \$* " == *" publish switch "* ]]; then
+	echo "ERROR: simulated publish failure" >&2
+	exit 1
+fi
+exec "$real_aptly" "\$@"
+EOF
+chmod +x "$tmp/shim-noswitch/aptly"
+scope movediff
+export SHIM_STATE_PATH=movediff
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+must_fail "a move whose publication fails" "simulated publish failure" \
+	env PATH="$tmp/shim-noswitch:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the failed move left main listing bootc" listed_in trixie main bootc '1.2-1~deb13'
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "the next run refuses the repository that differs from its published snapshot" \
+	"frostyard-trixie does not hold the package set of its published snapshot" run move.sh
+check "the refusal says the move starts from what the bucket serves" grep -q 'starts from what the bucket serves' "$tmp/err"
+check "the refusal says nothing was changed" grep -q 'nothing was changed' "$tmp/err"
+check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusal left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+must_pass "a dry run with --rebuild shows what it would do" run move.sh --dry-run --rebuild
+check "it would rebuild the repository" grep -q 'would rebuild frostyard-trixie from' "$tmp/err"
+check "it still plans the move" grep -qxF 'move trixie bootc 1.2-1~deb13 amd64 main -> image' "$tmp/err"
+check "and changed nothing" test "$(state_sum)" = "$state_before"
+must_pass "--rebuild starts from the published snapshot and moves" run move.sh --rebuild
+check "the move is published in image" listed_in trixie image bootc '1.2-1~deb13' amd64
+check "and gone from main" not_listed_in trixie main bootc '1.2-1~deb13'
+must_pass "the rebuilt move verifies" run verify.sh trixie --deep image/bootc=1.2-1~deb13 main/frostyard-updex=1.0
+
+# A registration for a component the codename does not publish is refused.
+scope moveno
+APT_CODENAMES_FILE=$tmp/codenames-main.tsv mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+before=$(inrelease trixie)
+must_fail "a name registered for a component the codename lacks is refused" \
+	"bootc is registered for component image, which trixie does not publish" \
+	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APT_PRODUCERS_FILE="$tmp/producers-move-image.tsv" \
+	APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# The secrets check reads no codename list, as in the section before this one.
 unset APT_CODENAMES_FILE
 export APT_PRODUCERS_FILE=$tmp/producers.tsv
 
