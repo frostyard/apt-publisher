@@ -55,4 +55,12 @@ for f in "$ROOT"/.github/workflows/*.yml; do
 	done
 done
 
+# Every workflow runs its steps with bash -eo pipefail: GitHub's implicit
+# shell has no pipefail, so `script | tee` would hide a failed script.
+for f in "$ROOT"/.github/workflows/*.yml; do
+	block=$(awk '/^defaults:/ { d = 1; next } d && /^[^ ]/ { d = 0 } d' "$f")
+	grep -qx '    shell: bash' <<<"$block" ||
+		fail "$(basename "$f") must set defaults.run.shell: bash (pipefail)"
+done
+
 echo "ok - configuration"
