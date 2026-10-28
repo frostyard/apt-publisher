@@ -148,7 +148,11 @@ aptly_init
 # write no report. No reconcile, no change, no save.
 if ((recheck)); then
 	for codename in "${codenames[@]}"; do
-		if [[ -z $(published_components "$codename") ]]; then
+		# A checked assignment: inside [[ $(...) ]] a failed query would read
+		# as "not published" and skip the read-back.
+		published_set=$(published_components "$codename") ||
+			die "cannot query the publication of $codename"
+		if [[ -z $published_set ]]; then
 			log "$codename is not published; nothing to recheck"
 			continue
 		fi

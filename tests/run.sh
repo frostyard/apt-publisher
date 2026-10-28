@@ -1378,6 +1378,20 @@ must_pass "a recheck of an unpublished codename has nothing to check" run move.s
 check "it prints nothing for it" test ! -s "$tmp/out"
 must_fail "--recheck with --dry-run is refused" "cannot be combined with --dry-run or --rebuild" run move.sh --recheck --dry-run
 must_fail "--recheck with --rebuild is refused" "cannot be combined with --dry-run or --rebuild" run move.sh --recheck --rebuild
+# A failed publication query is a failure, never "not published".
+mkdir -p "$tmp/shim-publist"
+cat >"$tmp/shim-publist/aptly" <<EOF
+#!/usr/bin/env bash
+if [[ " \$* " == *" publish list "* ]]; then
+	echo "ERROR: simulated publication list failure" >&2
+	exit 1
+fi
+exec "$real_aptly" "\$@"
+EOF
+chmod +x "$tmp/shim-publist/aptly"
+must_fail "a recheck fails when the publication query fails" "cannot query the publication of trixie" \
+	env PATH="$tmp/shim-publist:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/move.sh" --recheck --codename trixie
 
 # A missing producers file is an error, not "no producer registered": the
 # rollback guard and the move must fail closed.
