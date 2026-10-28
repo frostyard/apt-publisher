@@ -132,12 +132,6 @@ jobs:
       - name: Install canary through the public endpoint
         if: ${{ !inputs.dry_run && steps.move.outputs.codenames != '' }}
         run: |
-          # Allow the CDN a moment after the purge before failing.
-          for attempt in 1 2 3; do
-            if scripts/apt-canary.sh --report "$RUNNER_TEMP/report.tsv"; then
-              exit 0
-            fi
-            echo "canary attempt $attempt failed; retrying" >&2
-            sleep 30
-          done
-          exit 1
+          # The script retries a stale index and a transient fetch, and fails
+          # at once on a 404 or a bad hash.
+          scripts/apt-canary.sh --report "$RUNNER_TEMP/report.tsv"
