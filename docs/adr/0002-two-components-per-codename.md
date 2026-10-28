@@ -69,11 +69,16 @@ and the move runs again.
 component differs from its producer's registration:
 
 - it reconciles first, and refuses a working repository that differs from
-  its published snapshot;
+  its published snapshot, unless an operator gives `--rebuild` after
+  inspecting the refusal;
 - it moves all versions and architectures of a name with `aptly repo move`,
   so no package version changes;
 - it publishes both components of a codename in one `Release`, as one
   recoverable transaction;
+- it writes a move marker before it publishes. The next run of any script
+  drops the marker when the move became visible, and otherwise rebuilds both
+  working repositories from their published snapshots. A later publication
+  switches one component only, so it must never find a move half applied;
 - it reads every moved version back in its new component, checks that the
   old component no longer lists it, checks every pool file's MD5, purges the
   CDN, and runs the apt canary on the newest version of each name and
