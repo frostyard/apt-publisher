@@ -293,6 +293,24 @@ check "the committed codenames publish main,image" \
 	test "$(awk -F'\t' '!/^#/ && NF { print $1 "=" $4 }' "$ROOT/config/codenames.tsv" | paste -sd' ')" = \
 	'trixie=main,image forky=main,image'
 
+# The committed registrations (core ADR-0059 step 5): bootc-debian and incus
+# route to image, every other producer to main.
+check "the committed producers register bootc-debian and incus for image" \
+	test "$(awk -F'\t' '!/^#/ && NF && $6 == "image" { print $1 }' "$ROOT/config/producers.tsv" | sort | paste -sd' ')" = \
+	'frostyard/bootc-debian frostyard/incus'
+mkdeb "$tmp/committed-bootc" bootc '1.16.8-1~deb13' amd64
+mkdeb "$tmp/committed-bootc" libostree-1-1 '2026.3-1~deb13' amd64
+must_pass "dry run of bootc-debian with the committed configuration" \
+	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/bootc-debian --debs "$tmp/committed-bootc" --dry-run
+check "bootc routes to trixie/image" grep -q 'bootc_1.16.8-1~deb13_amd64.deb -> trixie/image' "$tmp/err"
+check "libostree-1-1 routes to trixie/image" grep -q 'libostree-1-1_2026.3-1~deb13_amd64.deb -> trixie/image' "$tmp/err"
+mkdeb "$tmp/committed-incus" incus '1:7.5.1-debian13-202610031200' amd64
+must_pass "dry run of incus with the committed configuration" \
+	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/incus --debs "$tmp/committed-incus" --dry-run
+check "incus routes to trixie/image" grep -q 'incus_7.5.1-debian13-202610031200_amd64.deb -> trixie/image' "$tmp/err"
+
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb13' amd64
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb14' amd64
 must_pass "dry run succeeds" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/bootc" --dry-run
