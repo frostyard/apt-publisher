@@ -698,6 +698,9 @@ for arch in amd64 arm64 all; do
 	mkindex "$debmirror" forky-updates main "$arch" libc6
 	mkindex "$debsec" forky-security main "$arch"
 done
+# Installer udebs (COMPONENT/debian-installer/) are not host packages: a
+# Frostyard name there is not reported.
+mkindex "$debmirror" trixie main/debian-installer amd64 frostyard-updex
 for suite in trixie trixie-updates forky forky-updates; do mkrelease "$debmirror" "$suite"; done
 for suite in trixie-security forky-security; do mkrelease "$debsec" "$suite"; done
 
@@ -722,7 +725,8 @@ check "a name in the codename suite is reported with every suite that ships it" 
 	grep -qx 'DEBIAN-NAME trixie trixie-thing trixie,trixie-updates' "$tmp/out"
 check "a name in the security suite only is reported with -security" \
 	grep -qx 'DEBIAN-NAME trixie incus trixie-security' "$tmp/out"
-check "a Frostyard-only name is not reported" absent frostyard-updex "$tmp/out"
+check "a Frostyard-only name is not reported, also when an installer udeb has it" \
+	absent frostyard-updex "$tmp/out"
 check "a Debian name in image is not reported" absent imgpkg "$tmp/out"
 check "a missing suite is skipped" grep -q 'trixie-backports does not exist' "$tmp/err"
 check "the findings are the only output" test "$(wc -l <"$tmp/out")" = 2

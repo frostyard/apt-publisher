@@ -50,10 +50,11 @@ suite_names() {
 	fetch "$mirror/dists/$suite/Release" "$rel" || return $?
 	: >"$out.unsorted"
 	# Index paths are always COMPONENT/binary-ARCH/Packages.xz, in the SHA256
-	# section only, also for the security archive.
+	# section only, also for the security archive. COMPONENT/debian-installer/
+	# holds installer udebs, which no host installs: skip it.
 	while read -r hash path; do
 		for arch in $archs; do
-			[[ $path == */binary-$arch/Packages.xz ]] || continue
+			[[ $path =~ ^[^/]+/binary-$arch/Packages\.xz$ ]] || continue
 			fetch "$mirror/dists/$suite/$path" "$tmp/Packages.xz" ||
 				die "$mirror/dists/$suite/$path is listed in its Release but missing"
 			[[ $(sha256sum <"$tmp/Packages.xz" | cut -d' ' -f1) == "$hash" ]] ||
@@ -68,8 +69,12 @@ while IFS=$'\t' read -r codename _ archs _; do
 	archs=${archs//,/ }
 	: >"$tmp/frostyard"
 	published=0
+	# Frostyard's own index: absent is a warning; any other failure is fatal,
+	# so a failed read never reads as "no names in main".
 	for arch in $archs; do
-		if curl -fsSL --retry 3 -o "$tmp/Packages" "$APT_PUBLIC_URL/dists/$codename/main/binary-$arch/Packages"; then
+		rc=0
+		fetch "$APT_PUBLIC_URL/dists/$codename/main/binary-$arch/Packages" "$tmp/Packages" || rc=$?
+		if [[ $rc == 0 ]]; then
 			published=1
 			sed -n 's/^Package: //p' "$tmp/Packages" >>"$tmp/frostyard"
 		else
@@ -93,7 +98,7 @@ while IFS=$'\t' read -r codename _ archs _; do
 			continue
 		fi
 		[[ $rc == 0 ]] || exit "$rc"
-		comm -12 "$tmp/frostyard" "$tmp/debian" | sed "s/\$/ $suite/" >>"$tmp/hits"
+		LC_ALL=C comm -12 "$tmp/frostyard" "$tmp/debian" | sed "s/\$/ $suite/" >>"$tmp/hits"
 		log "audited $codename against $suite"
 	done
 	# One line per package; its suites in sorted order.
