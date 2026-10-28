@@ -16,6 +16,11 @@ fpr=$(gpg --show-keys --with-colons "$APT_KEYRING" | awk -F: '/^fpr/ { print $10
 [[ $fpr == "$APT_SIGNING_KEY_FPR" ]] ||
 	fail "keys/frostyard.gpg ($fpr) is not APT_SIGNING_KEY_FPR ($APT_SIGNING_KEY_FPR)"
 
+# Hosts install the file as it is (core ADR-0059): a binary keyring.
+if grep -q 'BEGIN PGP' "$APT_KEYRING"; then
+	fail "keys/frostyard.gpg is ASCII-armored; it must be a binary keyring"
+fi
+
 awk -F'\t' '!/^#/ && NF {
 	if (NF != 4 || $2 !~ /^[0-9]+$/ || $3 !~ /^[a-z0-9]+(,[a-z0-9]+)*$/) { print "codenames.tsv line " FNR ": expected 4 columns: codename, Debian major, architectures, components"; bad = 1; next }
 	if ($4 != "main" && $4 != "main,image") { print "codenames.tsv line " FNR ": components must be main or main,image"; bad = 1 }

@@ -576,7 +576,7 @@ check "every snapshot keeps the main name pattern" \
 	test "$(grep -oE '\[(trixie|forky)[^]]*\]' "$tmp/out" | grep -Evc '^\[(trixie|forky)-[0-9]{8}T[0-9]{6}Z-')" = 0
 check "no snapshot is named for image" test "$(grep -c 'image' "$tmp/out" || true)" = 0
 check "purge lists no image URL" test "$("$ROOT/scripts/purge-cache.sh" --print trixie | grep -c '/image/' || true)" = 0
-check "purge lists the same 15 URLs as before" test "$("$ROOT/scripts/purge-cache.sh" --print trixie | wc -l)" = 15
+check "purge lists the same 15 URLs as before, plus the key" test "$("$ROOT/scripts/purge-cache.sh" --print trixie | wc -l)" = 16
 expected=("$APT_PUBLIC_URL/dists/trixie/InRelease" "$APT_PUBLIC_URL/dists/trixie/Release" "$APT_PUBLIC_URL/dists/trixie/Release.gpg")
 for arch in amd64 arm64 all; do
 	for f in Packages Packages.gz Packages.bz2 Release; do
@@ -584,7 +584,107 @@ for arch in amd64 arm64 all; do
 	done
 done
 check "purge lists the same URLs in the same order as before" \
-	test "$("$ROOT/scripts/purge-cache.sh" --print trixie)" = "$(printf '%s\n' "${expected[@]}")"
+	test "$("$ROOT/scripts/purge-cache.sh" --print trixie | grep -v '/frostyard.gpg$')" = "$(printf '%s\n' "${expected[@]}")"
+
+# --- the published key (core ADR-0059) ---
+
+scope keyfile
+mkdeb "$tmp/key-a" frostyard-updex 1.0.0 amd64
+mkdeb "$tmp/key-b" frostyard-updex 1.0.1 amd64
+mkdeb "$tmp/key-c" frostyard-updex 1.0.2 amd64
+check "the key is absent before the first publication" test ! -e "$pub/frostyard.gpg"
+must_pass "a first publication uploads the key" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/key-a" --codenames trixie
+check "the first publication logged the upload" grep -q 'uploaded the published key' "$tmp/err"
+check "the published key is byte-identical to the keyring" cmp -s "$pub/frostyard.gpg" "$APT_KEYRING"
+must_pass "a second publication succeeds" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/key-b" --codenames trixie
+check "the second publication found the key current" grep -q 'published key is current' "$tmp/err"
+check "the second publication did not upload it again" \
+	test "$(grep -c 'uploaded the published key' "$tmp/err" || true)" = 0
+must_pass "verify passes when the key matches" run verify.sh trixie
+corrupt frostyard.gpg
+must_fail "verify fails when the key object differs" "published key .* missing or differs" \
+	run verify.sh trixie
+must_pass "the next publication replaces a wrong key" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/key-c" --codenames trixie
+check "the replacement was logged" grep -q 'uploaded the published key' "$tmp/err"
+check "the key is byte-identical again" cmp -s "$pub/frostyard.gpg" "$APT_KEYRING"
+must_pass "verify passes after the repair" run verify.sh trixie
+# Different bytes with the keyring's length and modification time.
+head -c "$(stat -c %s "$APT_KEYRING")" /dev/zero | tr '\0' x >"$tmp/key-same-size"
+touch -r "$APT_KEYRING" "$tmp/key-same-size"
+rclone copyto --ignore-times "$tmp/key-same-size" "r2:frostyardrepo/$APT_PREFIX/frostyard.gpg"
+check "the same-size key object differs from the keyring" \
+	test "$(stat -c %s "$pub/frostyard.gpg")" = "$(stat -c %s "$APT_KEYRING")" -a \
+	"$(sha256sum <"$pub/frostyard.gpg")" != "$(sha256sum <"$APT_KEYRING")"
+mkdeb "$tmp/key-d" frostyard-updex 1.0.3 amd64
+must_pass "the next publication replaces a same-size, same-time key" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/key-d" --codenames trixie
+check "the same-size key was replaced" cmp -s "$pub/frostyard.gpg" "$APT_KEYRING"
+rclone deletefile "r2:frostyardrepo/$APT_PREFIX/frostyard.gpg"
+must_fail "verify fails when the key object is missing" "published key .* missing or differs" \
+	run verify.sh trixie
+must_pass "withdraw restores a missing key" \
+	run withdraw.sh --codename trixie --package frostyard-updex --version 1.0.3
+check "the key is back after the withdrawal" cmp -s "$pub/frostyard.gpg" "$APT_KEYRING"
+
+"$ROOT/scripts/purge-cache.sh" --print trixie forky >"$tmp/purge.txt"
+check "purge lists the key URL once for two codenames" \
+	test "$(grep -cx "$APT_PUBLIC_URL/frostyard.gpg" "$tmp/purge.txt")" = 1
+
+jq -n '{tagName: "v1.0.1", assets: [{name: "frostyard-updex_1.0.1_amd64.deb"}]}' >"$tmp/gh/frostyard_updex.json"
+# Only updex is audited here; the other producers have nothing in this scope.
+grep -E '^(#|frostyard/updex	)' "$tmp/producers.tsv" >"$tmp/producers-key.tsv"
+must_pass "the audit passes when the key matches" \
+	env PATH="$tmp/shim-gh:$PATH" APT_PRODUCERS_FILE="$tmp/producers-key.tsv" "$ROOT/scripts/audit-producers.sh"
+corrupt frostyard.gpg
+if env PATH="$tmp/shim-gh:$PATH" APT_PRODUCERS_FILE="$tmp/producers-key.tsv" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the audit reports a different key (unexpectedly passed)"
+fi
+check "the audit reports a different key" grep -qx "MISMATCH key $APT_PUBLIC_URL/frostyard.gpg" "$tmp/out"
+rclone deletefile "r2:frostyardrepo/$APT_PREFIX/frostyard.gpg"
+if env PATH="$tmp/shim-gh:$PATH" APT_PRODUCERS_FILE="$tmp/producers-key.tsv" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the audit reports a missing key (unexpectedly passed)"
+fi
+check "the audit reports a missing key" grep -qx "MISSING key $APT_PUBLIC_URL/frostyard.gpg" "$tmp/out"
+
+# The recovery of an interrupted publication also gates on the key.
+scope keyrecover
+export SHIM_STATE_PATH=keyrecover SHIM_FAIL_AT=2
+rm -f -- "$tmp/shim-rclone/count"
+mkdeb "$tmp/kr-a" frostyard-updex 2.0.0 amd64
+must_fail "a publication interrupted after it became visible fails" "simulated failure" \
+	env PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/kr-a" --codenames trixie
+rclone deletefile "r2:frostyardrepo/$APT_PREFIX/frostyard.gpg"
+# A shim that fails the upload of the key object.
+mkdir -p "$tmp/shim-key"
+cat >"$tmp/shim-key/rclone" <<EOF
+#!/usr/bin/env bash
+if [[ \$1 == copyto && \${*: -1} == */frostyard.gpg ]]; then
+	echo "shim: simulated failure uploading the key" >&2
+	exit 1
+fi
+exec "$real_rclone" "\$@"
+EOF
+chmod +x "$tmp/shim-key/rclone"
+before=$(inrelease trixie)
+db_before=$(rclone hashsum md5 r2:frostyard-apt-state/keyrecover/db | sort)
+must_fail "a recovery whose key upload fails fails" "cannot upload the key" \
+	env PATH="$tmp/shim-key:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/kr-a" --codenames trixie
+check "the failed recovery left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the failed recovery left the state database unchanged" \
+	test "$(rclone hashsum md5 r2:frostyard-apt-state/keyrecover/db | sort)" = "$db_before"
+check "the key is still absent" test ! -e "$pub/frostyard.gpg"
+must_pass "the next run completes the publication" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/kr-a" --codenames trixie
+check "that run completed the interrupted publication" grep -q 'completing the interrupted publication of trixie' "$tmp/err"
+check "the recovery restored the key byte for byte" cmp -s "$pub/frostyard.gpg" "$APT_KEYRING"
+must_pass "the recovered suite verifies" run verify.sh trixie frostyard-updex=2.0.0
+export SHIM_FAIL_AT=0
+rm -f -- "$tmp/shim-rclone/count"
 
 # --- an older database cannot overwrite newer publications -------------------------------
 
@@ -853,7 +953,7 @@ check "the Release lists both components again" grep -qx 'Components: image main
 
 # purge covers every component's indexes; main's URLs come first, unchanged.
 "$ROOT/scripts/purge-cache.sh" --print trixie >"$tmp/purge.txt"
-check "purge lists 27 URLs for two components" test "$(wc -l <"$tmp/purge.txt")" = 27
+check "purge lists 27 URLs for two components, plus the key" test "$(wc -l <"$tmp/purge.txt")" = 28
 for arch in amd64 arm64 all; do
 	for f in Packages Packages.gz Packages.bz2 Release; do
 		check "purge lists image/binary-$arch/$f" grep -qx "$APT_PUBLIC_URL/dists/trixie/image/binary-$arch/$f" "$tmp/purge.txt"

@@ -8,8 +8,11 @@
 # Report-only: it never publishes, so a withdrawn version is reported, not
 # restored. Asset names must follow name_version_arch.deb.
 #
+# It also checks that the published key, APT_PUBLIC_URL/frostyard.gpg (core
+# ADR-0059), exists and matches keys/frostyard.gpg byte for byte.
+#
 # Exits 1 and prints "MISSING producer tag asset" lines when anything is
-# unpublished.
+# unpublished, and "MISSING key URL" or "MISMATCH key URL" for the key.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -31,6 +34,15 @@ listed_anywhere() {
 	done
 	return 1
 }
+
+key_url=$APT_PUBLIC_URL/frostyard.gpg
+if ! curl -fsSL --retry 3 -o "$tmp/key.gpg" "$key_url"; then
+	printf 'MISSING key %s\n' "$key_url"
+	missing=1
+elif ! cmp -s -- "$tmp/key.gpg" "$APT_KEYRING"; then
+	printf 'MISMATCH key %s\n' "$key_url"
+	missing=1
+fi
 
 declare -A fetched=()
 while IFS=$'\t' read -r producer _ codenames _ _ component; do

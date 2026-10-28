@@ -213,6 +213,18 @@ Signed-By: /etc/apt/keyrings/frostyard.gpg
 The signing key is the one that signs the legacy suite, so existing
 keyrings keep working.
 
+### Published key
+
+The binary keyring `keys/frostyard.gpg` is served at
+`https://repository.frostyard.org/debian/frostyard.gpg`, and hosts install
+it directly as `/etc/apt/keyrings/frostyard.gpg` (core ADR-0059). This
+repository is its only writer. Every publication (publish, withdraw,
+rollback, import) uploads it first when the bucket copy is missing or
+differs, so a failed upload changes no state. Every publication and
+`verify.sh` read it back and compare the bytes. The cache purge lists its
+URL, and the producer audit reports `MISSING key` or `MISMATCH key`. The
+legacy `/public.key` stays unchanged and is not touched.
+
 ## One-time setup
 
 1. Create a private R2 bucket, `frostyard-apt-state`.

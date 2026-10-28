@@ -32,6 +32,9 @@ for codename in "$@"; do
 	done
 done
 
+# The published key (core ADR-0059): once, not once per codename.
+urls+=("$APT_PUBLIC_URL/frostyard.gpg")
+
 if ((print)); then
 	printf '%s\n' "${urls[@]}"
 	exit 0
