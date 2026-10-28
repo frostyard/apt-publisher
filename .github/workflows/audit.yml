@@ -11,6 +11,13 @@ on:
 permissions:
   contents: read
 
+# Explicit bash runs every step with -eo pipefail. Without it, GitHub runs
+# `bash -e` with no pipefail, so `script | tee` takes tee's status and a
+# failed script passes.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   audit:
     # Until the repository is live every release is "missing". Scheduled runs
