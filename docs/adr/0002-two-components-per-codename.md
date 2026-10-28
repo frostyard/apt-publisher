@@ -75,10 +75,13 @@ component differs from its producer's registration:
   so no package version changes;
 - it publishes both components of a codename in one `Release`, as one
   recoverable transaction;
-- it writes a move marker before it publishes. The next run of any script
-  drops the marker when the move became visible, and otherwise rebuilds both
+- it saves a move marker (the new snapshot names and the moved versions)
+  before it changes any working repository. The next run of any script drops
+  the marker when the move became visible, and otherwise rebuilds both
   working repositories from their published snapshots. A later publication
-  switches one component only, so it must never find a move half applied;
+  switches one component only, so it must never find a move half applied. A
+  rerun of the move that finds its earlier move completed still reads it
+  back, purges the CDN and runs the canary;
 - it reads every moved version back in its new component, checks that the
   old component no longer lists it, checks every pool file's MD5, purges the
   CDN, and runs the apt canary on the newest version of each name and
