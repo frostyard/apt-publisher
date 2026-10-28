@@ -60,7 +60,9 @@ Each run restores it, as on a fresh runner, and saves it back:
 - `db/`: aptly's database. Replaced files are kept under `history/`.
 - `pool/`: aptly's package pool, append-only.
 - `txn/`: pending markers recording the snapshot a publication was about to
-  make visible, one per component (`pending-trixie`, `pending-trixie-image`).
+  make visible, one per component (`pending-trixie`, `pending-trixie-image`),
+  and a move marker while a move runs (`move-trixie`; see
+  [Moving packages between components](#moving-packages-between-components)).
 
 ### Keeping state and bucket in step
 
@@ -218,6 +220,19 @@ When a producer's registration changes component, the **move** workflow
   `move CODENAME NAME VERSION ARCH FROM -> TO` line per package, and changes
   nothing. The live run reads the result back (deep check), purges the CDN
   cache and runs the canary on the newest moved version of each package.
+- **A move that dies is settled by the next run.** A move changes two
+  components and saves its repositories before it publishes, so it writes a
+  move marker first (`txn/move-CODENAME`, one `component snapshot` line per
+  changed component) and removes it after it. The next run of any script
+  reconciles first. If the move became visible, it completes it and drops
+  the marker. If it never became visible, it undoes it: it rebuilds the
+  changed working repositories from the published snapshots, drops the
+  marker, and logs that an interrupted move was undone. Run the move again.
+  Without this, a publication that waited in the queue would switch one
+  component only and strand the move in the other: the names would leave
+  `main` and never reach `image`. `switch.sh --list` prints a marker as
+  `move pending: CODENAME component=snapshot ...`, and `switch.sh --force`
+  drops it.
 - It starts from what the bucket serves: a working repository that differs
   from its published snapshot is refused. `--rebuild` rebuilds it from the
   published snapshot after a run that died between saving and publishing.

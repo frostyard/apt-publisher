@@ -22,7 +22,7 @@
 # --force skips reconcile_state and lets aptly overwrite pool files whose
 # bucket copy differs: it replaces whatever the bucket serves for CODENAME
 # with aptly's view. Use it only to recover after inspecting a refusal.
-# --list prints snapshots, publications and pending markers instead.
+# --list prints snapshots, publications, and pending and move markers instead.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -54,6 +54,10 @@ if ((list)); then
 	aptly_init
 	aptly_ publish list
 	aptly_ snapshot list -sort=time
+	for f in "$APTLY_ROOT"/txn/move-*; do
+		[[ -f $f ]] || continue
+		printf 'move pending: %s %s\n' "${f##*/move-}" "$(awk '{ printf "%s%s=%s", sep, $1, $2; sep = " " }' "$f")"
+	done
 	for f in "$APTLY_ROOT"/txn/pending-*; do
 		[[ -f $f ]] || continue
 		marker=${f##*/pending-}
@@ -115,6 +119,10 @@ done
 if ((force)); then
 	log "warning: --force: not reconciling $codename with the bucket; overwriting differing pool files"
 	drop_pending "$codename"
+	if [[ -f $(move_file "$codename") ]]; then
+		log "warning: --force: dropping the move marker of $codename; its working repositories are rebuilt only for the snapshots you give"
+		drop_move "$codename"
+	fi
 	# shellcheck disable=SC2034 # read by publish_snapshot in lib.sh
 	force_overwrite=1
 else

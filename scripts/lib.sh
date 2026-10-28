@@ -169,6 +169,11 @@ aptly_init() {
 #   txn/   pending-<codename> (main) and pending-<codename>-image: the
 #          snapshot a publication was about to make visible, so an interrupted
 #          run can be completed (reconcile_state).
+#          move-<codename>: written by move.sh (one "component snapshot" line
+#          for each component it changes) before its publication, and removed
+#          after it. A move changes two components, so a run that publishes
+#          one component only must not find them half moved: reconcile_state
+#          undoes a move that never became visible (settle_move).
 
 state_remote() { printf 'r2:%s/%s' "$APT_STATE_BUCKET" "$APT_STATE_PATH"; }
 
@@ -212,6 +217,12 @@ drop_pending() {
 		rm -f -- "$(pending_file "$1" "$c")"
 	done
 }
+
+# move_file CODENAME: the marker of a move in progress (see the state notes).
+move_file() { printf '%s/txn/move-%s' "$APTLY_ROOT" "$1"; }
+
+# drop_move CODENAME removes the move marker.
+drop_move() { rm -f -- "$(move_file "$1")"; }
 
 # snapshot_exists SNAPSHOT. Not `aptly snapshot show`: it fails once the
 # snapshot's source repository has been rebuilt (rebuild_repo). The list is
@@ -422,6 +433,55 @@ bucket_set() {
 	rm -f -- "$tmp" "$tmp.tsv"
 }
 
+# settle_move CODENAME deals with the move marker, after reconcile_state has
+# proved that the bucket serves the published snapshots (completing an
+# interrupted publication first). The caller saves the state afterwards.
+#   - The published snapshots of the marker's components are the marker's:
+#     the move became visible. Drop the marker.
+#   - Otherwise the move never became visible, but move.sh saved its changed
+#     working repositories with the marker. A later run would add to one
+#     component only and switch only that one, which strands the move in the
+#     other component. Rebuild each marker component's working repository
+#     from its published snapshot (empty when it has none), so the move can
+#     simply run again, and drop the marker.
+settle_move() {
+	local codename=$1 f component snapshot published repo i visible=1
+	local -a comps=() snaps=()
+	f=$(move_file "$codename")
+	[[ -f $f ]] || return 0
+	while read -r component snapshot; do
+		[[ -n $component ]] || continue
+		comps+=("$component")
+		snaps+=("$snapshot")
+	done <"$f"
+	((${#comps[@]})) || die "the move marker $f is empty; inspect it, then recover with switch.sh --force"
+	for i in "${!comps[@]}"; do
+		published=$(published_snapshot "$codename" "${comps[i]}")
+		[[ $published == "${snaps[i]}" ]] || visible=0
+	done
+	if ((visible)); then
+		log "the interrupted move of $codename (${snaps[*]}) is visible; dropping its marker"
+		drop_move "$codename"
+		return 0
+	fi
+	for component in "${comps[@]}"; do
+		published=$(published_snapshot "$codename" "$component")
+		if [[ -n $published ]]; then
+			rebuild_repo "$codename" "$component" "$published"
+			continue
+		fi
+		repo=$(repo_name "$codename" "$component")
+		if repo_exists "$repo"; then
+			aptly_ repo drop -force "$repo" >/dev/null
+		fi
+		ensure_repo "$codename" "$component" >/dev/null
+		log "rebuilt $repo empty: $codename publishes no $component snapshot"
+	done
+	drop_move "$codename"
+	drop_pending "$codename"
+	log "an interrupted move of $codename never became visible and was undone: rebuilt the working repositories of ${comps[*]} from the published snapshots; run the move again"
+}
+
 # reconcile_state CODENAME runs before any change to CODENAME. It proves
 # that aptly's database describes what the bucket serves, comparing package
 # sets because a Release file changes on every publication. The bucket must
@@ -437,7 +497,9 @@ bucket_set() {
 #   - anything else (lost, older or foreign state) is refused.
 # A published codename that lacks a configured component is on its way to
 # publishing it: the caller adds it empty. A configuration that would remove
-# a component from a published codename is refused.
+# a component from a published codename is refused. Once the bucket is
+# proved current, a move marker is settled (settle_move): dropped when its
+# move became visible, undone when it did not. Every other refusal stands.
 reconcile_state() {
 	local codename=$1 configured published_set published pending bucket c
 	local release have all_current=1 completable=1 markers=0 pubs='' pends=''
@@ -452,6 +514,7 @@ reconcile_state() {
 				die "aptly's database publishes $codename from $published, but the bucket has no dists/$codename"
 		done
 		drop_pending "$codename"
+		drop_move "$codename"
 		return 0
 	fi
 	if [[ -n $published_set && $published_set != "$configured" ]]; then
@@ -498,6 +561,10 @@ reconcile_state() {
 	done
 	if ((all_current)); then
 		drop_pending "$codename"
+		if [[ -f $(move_file "$codename") ]]; then
+			settle_move "$codename"
+			state_save
+		fi
 		return 0
 	fi
 	if ((markers && completable)); then
@@ -510,6 +577,7 @@ reconcile_state() {
 		log "completing the interrupted publication of $codename from ${names[*]}"
 		publish_snapshot "$codename" "${specs[@]}"
 		drop_pending "$codename"
+		settle_move "$codename"
 		state_save
 		return 0
 	fi

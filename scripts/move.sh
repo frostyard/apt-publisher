@@ -25,6 +25,13 @@
 # With --dry-run nothing is reconciled, changed or saved: it prints the plan
 # and stops. A live run validates every codename before it changes any.
 #
+# A move changes two components, and its publication is saved before it
+# becomes visible. A move marker (txn/move-CODENAME, written before the
+# publication, removed after it) lets the next run of any script settle it
+# (reconcile_state): complete a move that became visible, and undo one that
+# did not, by rebuilding the changed working repositories from the published
+# snapshots. Then the move can simply run again.
+#
 # Prints "CODENAME SNAPSHOT SNAPSHOT" on stdout for each published codename.
 # With --report FILE, writes "codename name version arch component" rows for
 # apt-canary.sh: only the newest version of each (codename, name, arch), so
@@ -199,6 +206,7 @@ for codename in "${codenames[@]}"; do
 	commits=()
 	snapshots=()
 	changed_components=()
+	marker=''
 	for component in ${configured//,/ }; do
 		[[ -n ${changed[$component]:-} ]] || continue
 		changed_components+=("$component")
@@ -206,6 +214,7 @@ for codename in "${codenames[@]}"; do
 		aptly_ snapshot create "$snapshot" from repo "$(repo_name "$codename" "$component")" >/dev/null
 		commits+=("$codename/$component=$snapshot")
 		snapshots+=("$snapshot")
+		marker+="$component $snapshot"$'\n'
 	done
 	others=$(missing_component_snapshots "$codename" move "${changed_components[@]}")
 	if [[ -n $others ]]; then
@@ -215,7 +224,14 @@ for codename in "${codenames[@]}"; do
 			snapshots+=("${spec#*=}")
 		done
 	fi
+	# The move changes two components, and commit_publications saves the
+	# repositories before it publishes. The marker, saved with them, lets the
+	# next run undo a move that never became visible (settle_move): else a
+	# publication of one component would strand the move in the other.
+	printf '%s' "$marker" >"$(move_file "$codename")"
 	commit_publications "${commits[@]}"
+	drop_move "$codename"
+	state_save
 	verify_published "$codename" --deep "${expect[@]}"
 	printf '%s %s\n' "$codename" "${snapshots[*]}"
 

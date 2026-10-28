@@ -1245,6 +1245,25 @@ mv_setup() {
 	mv_publish frostyard/updex frostyard-updex 1.0 amd64
 }
 
+# working_repo CODENAME COMPONENT prints the working repository's packages.
+# shellcheck disable=SC2016 # the script runs in the child shell
+working_repo() {
+	APTLY_ROOT=$(mktemp -d "$tmp/runner.XXXXXX") bash -c '. "$1/scripts/lib.sh"; aptly_init >/dev/null 2>&1
+		aptly_ repo search -format="{{.Package}} {{.Version}} {{.Architecture}}" "$(repo_name "$2" "$3")" 2>/dev/null | LC_ALL=C sort || true' \
+		_ "$ROOT" "$1" "$2"
+}
+# mv_drift CODENAME NAME removes NAME from the main working repository and
+# saves the state: drift that no move marker explains.
+# shellcheck disable=SC2016 # the script runs in the child shell
+mv_drift() {
+	APTLY_ROOT=$(mktemp -d "$tmp/runner.XXXXXX") bash -c '. "$1/scripts/lib.sh"; aptly_init >/dev/null 2>&1
+		aptly_ repo remove "$(repo_name "$2" main)" "$3" >/dev/null 2>&1; state_save >/dev/null 2>&1' _ "$ROOT" "$1" "$2"
+}
+# txn_markers prints the names in the state bucket's txn/ (none when absent).
+txn_markers() { rclone lsf "r2:frostyard-apt-state/$APT_STATE_PATH/txn" 2>/dev/null || true; }
+no_move_marker() { [[ $(txn_markers) != *move-* ]]; }
+has_move_marker() { [[ $(txn_markers) == *move-trixie* ]]; }
+
 scope move
 export SHIM_STATE_PATH=move
 mv_setup
@@ -1309,6 +1328,7 @@ check "apt with main and image gives the same libostree-1-1 candidate as before"
 check "apt with main alone has no bootc candidate" candidate_is trixie amd64 bootc '' main
 check "the report keeps the newest version of each package and architecture only" \
 	test "$(cat "$tmp/mv-report.tsv")" = "$(printf 'trixie\tbootc\t1.2-1~deb13\tarm64\timage\ntrixie\tbootc\t1:0.5-1~deb13\tamd64\timage\ntrixie\tlibostree-1-1\t2026.3-1~deb13\tamd64\timage\ntrixie\tlibostree-1-1\t2026.3-1~deb13\tarm64\timage\n')"
+check "no move marker remains in the state bucket" no_move_marker
 must_pass "no pending marker is left" run switch.sh --list
 check "switch --list shows no pending marker" test "$(grep -c '^pending:' "$tmp/out" || true)" = 0
 must_pass "the move's suite passes the deep check" \
@@ -1363,8 +1383,12 @@ must_fail "a move interrupted after it became visible fails" "simulated failure"
 	env SHIM_FAIL_AT=2 PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
 check "the interrupted move is visible in image" listed_in trixie image bootc '1.2-1~deb13' arm64
 check "and gone from main" not_listed_in trixie main bootc '1.2-1~deb13' arm64
+check "its state holds the move marker" has_move_marker
 must_pass "the next run completes it" run move.sh
 check "the next run reported the completion" grep -q 'completing the interrupted publication of trixie' "$tmp/err"
+check "the next run dropped the move marker" grep -q 'the interrupted move of trixie .* is visible; dropping its marker' "$tmp/err"
+check "no move marker remains" no_move_marker
+check "the next run did not undo the move" test -z "$(grep -E 'never became visible|rebuilt frostyard' "$tmp/err" || true)"
 check "and has nothing left to move" grep -qxF 'nothing to move in trixie' "$tmp/err"
 must_pass "the completed suite verifies" run verify.sh trixie --deep image/bootc=1.2-1~deb13 '!main/bootc=1.2-1~deb13'
 must_pass "no pending marker remains" run switch.sh --list
@@ -1381,8 +1405,11 @@ check "the files stay in both pools" test -n "$(find "$pub/pool/main" -name boot
 	-n "$(find "$pub/pool/image" -name bootc_1.2-1~deb13_arm64.deb)"
 must_pass "main publishes bootc again" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/mv-new"
 
-# A working repository that differs from its published snapshot is refused:
-# a move that died after it saved its repositories, before it published.
+# A move that dies after it saved its repositories and before it published
+# (an R2 error in publish switch) must not leave the components half moved: a
+# publication that waits in the queue switches one component only. The next
+# run, whichever script it is, undoes the move (settle_move), so the move can
+# run again.
 mkdir -p "$tmp/shim-noswitch"
 cat >"$tmp/shim-noswitch/aptly" <<EOF
 #!/usr/bin/env bash
@@ -1393,17 +1420,72 @@ fi
 exec "$real_aptly" "\$@"
 EOF
 chmod +x "$tmp/shim-noswitch/aptly"
-scope movediff
-export SHIM_STATE_PATH=movediff
-mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+scope moveundo
+export SHIM_STATE_PATH=moveundo
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64 arm64
+mv_publish frostyard/bootc-debian bootc '1.10-1~deb13' amd64
 mv_publish frostyard/updex frostyard-updex 1.0 amd64
 export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
 must_fail "a move whose publication fails" "simulated publish failure" \
 	env PATH="$tmp/shim-noswitch:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
 check "the failed move left main listing bootc" listed_in trixie main bootc '1.2-1~deb13'
+check "the saved state holds the move marker" has_move_marker
+must_pass "switch --list shows the move marker" run switch.sh --list
+check "it names the components and their snapshots" \
+	grep -Eq "^move pending: trixie main=trixie-$snapshot_re-move image=trixie-image-$snapshot_re-move\$" "$tmp/out"
+mkdeb "$tmp/mv-undo-updex" frostyard-updex 1.1 amd64
+must_pass "a publication of an unrelated main package runs" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/mv-undo-updex" --codenames trixie
+check "it undid the interrupted move" grep -q 'an interrupted move of trixie never became visible and was undone' "$tmp/err"
+check "it published the package" listed_in trixie main frostyard-updex 1.1
+for pair in 'bootc 1.2-1~deb13 amd64' 'bootc 1.2-1~deb13 arm64' 'bootc 1.10-1~deb13 amd64'; do
+	read -r name version arch <<<"$pair"
+	check "main still lists $name $version $arch" listed_in trixie main "$name" "$version" "$arch"
+	check "the main working repository holds $name $version $arch" \
+		grep -qxF "$name $version $arch" <<<"$(working_repo trixie main)"
+done
+check "the image working repository is empty" test -z "$(working_repo trixie image)"
+check "no move marker remains" no_move_marker
+must_pass "the move runs again" run move.sh --report "$tmp/mv-undo.tsv"
+for pair in 'bootc 1.2-1~deb13 amd64' 'bootc 1.2-1~deb13 arm64' 'bootc 1.10-1~deb13 amd64'; do
+	read -r name version arch <<<"$pair"
+	check "image lists $name $version $arch" listed_in trixie image "$name" "$version" "$arch"
+	check "main no longer lists $name $version $arch" not_listed_in trixie main "$name" "$version" "$arch"
+done
+check "main keeps frostyard-updex 1.1" listed_in trixie main frostyard-updex 1.1
+must_pass "the repeated move verifies" run verify.sh trixie --deep image/bootc=1.10-1~deb13 '!main/bootc=1.10-1~deb13'
+check "no move marker remains after the repeated move" no_move_marker
+
+# switch.sh --force drops a move marker, and says so.
+scope moveforce
+export SHIM_STATE_PATH=moveforce
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+force_main=$(cut -d' ' -f2 "$tmp/out")
+run switch.sh --list >"$tmp/list" 2>&1
+force_image=$(grep -oE "trixie-image-$snapshot_re-[A-Za-z0-9._-]+" "$tmp/list" | sort -u | sed -n 1p)
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+must_fail "a move whose publication fails, again" "simulated publish failure" \
+	env PATH="$tmp/shim-noswitch:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the saved state holds the move marker, again" has_move_marker
+must_pass "a forced rollback runs" \
+	env APT_PRODUCERS_FILE="$tmp/producers-move-main.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/switch.sh" --codename trixie --snapshot "$force_main" --snapshot "$force_image" --force
+check "it dropped the move marker" grep -q 'dropping the move marker of trixie' "$tmp/err"
+check "no move marker remains after the forced rollback" no_move_marker
+check "main lists bootc" listed_in trixie main bootc '1.2-1~deb13' amd64
+
+# A working repository that differs from its published snapshot, with no move
+# marker to explain it, is refused.
+scope movedrift
+export SHIM_STATE_PATH=movedrift
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+mv_drift trixie bootc
 before=$(inrelease trixie)
 state_before=$(state_sum)
-must_fail "the next run refuses the repository that differs from its published snapshot" \
+must_fail "a run refuses the repository that differs from its published snapshot" \
 	"frostyard-trixie does not hold the package set of its published snapshot" run move.sh
 check "the refusal says the move starts from what the bucket serves" grep -q 'starts from what the bucket serves' "$tmp/err"
 check "the refusal says nothing was changed" grep -q 'nothing was changed' "$tmp/err"

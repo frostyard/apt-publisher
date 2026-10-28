@@ -21,7 +21,10 @@ the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision.
 - The move (`scripts/move.sh`) goes through `reconcile_state` and
   `commit_publications` like every publishing path, and `switch.sh` refuses
   snapshots that contradict a registration (core ADR-0059): a move is
-  reverted by a forward change, never by a rollback.
+  reverted by a forward change, never by a rollback. It writes a move
+  marker (`txn/move-<codename>`) before it publishes; `reconcile_state`
+  settles it (drops it when the move is visible, undoes it when not), so a
+  later single-component publication never strands a move.
 - Rollback rebuilds the working repository from the snapshot (`rebuild_repo`);
   otherwise the next publication would restore what was rolled back.
 - A codename publishes the components in `config/codenames.tsv` (`main`, or
