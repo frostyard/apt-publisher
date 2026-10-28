@@ -3,7 +3,10 @@
 This repository is the single writer of Frostyard's APT metadata at
 `repository.frostyard.org/debian`. aptly does the publishing; bash scripts in
 `scripts/` hold the policy; GitHub workflows call them. The README explains
-the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision.
+the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision;
+[ADR-0002](docs/adr/0002-two-components-per-codename.md) records the two
+components per codename, the move, the published key and the Debian-name
+audit (core ADR-0059).
 
 ## Invariants
 
