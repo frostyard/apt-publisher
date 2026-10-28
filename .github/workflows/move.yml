@@ -1,0 +1,143 @@
+# Move every published package to the component its producer is registered
+# for (core ADR-0059, step 5), in one publication per codename. Run it with
+# dry_run first: it prints the plan and changes nothing. A live run uploads
+# the moved files under pool/<component>/ (about 2.8 GB for the first move),
+# and the files under the old pool path stay. The move changes no package
+# version, so it notifies nobody. Revert a move by a forward change: register
+# the producer for its old component, then run this workflow again.
+# If a step after Move fails, or a retry is green with nothing to move, run it
+# with recheck=true (and dry_run=false): it changes nothing, reads the
+# published suite back, then purges the CDN cache and runs the canary.
+name: move
+
+on:
+  workflow_dispatch:
+    inputs:
+      codename:
+        description: Codename to move (all moves every codename)
+        type: choice
+        options: [all, trixie, forky]
+        default: all
+      dry_run:
+        description: Print the plan and change nothing
+        type: boolean
+        default: true
+      recheck:
+        description: Change nothing; read the published suite back, then purge the CDN cache and run the canary (set dry_run to false). Use it when a step after Move failed, or a retry was green with nothing to move
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# An explicit bash runs with -eo pipefail. Without it GitHub runs `bash -e`
+# without pipefail, and `scripts/move.sh ... | tee ...` takes tee's status,
+# so a failed move would pass its step.
+defaults:
+  run:
+    shell: bash
+
+# The single writer group, shared with publish.yml and the other writers.
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  move:
+    runs-on: ubuntu-24.04
+    # The live move uploads about 2.8 GB.
+    timeout-minutes: 120
+    environment: apt-repository
+    env:
+      # Request values reach scripts only through the environment.
+      CODENAME: ${{ inputs.codename }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      RECHECK: ${{ inputs.recheck }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Refuse a dry run that is also a recheck
+        if: ${{ inputs.dry_run && inputs.recheck }}
+        run: |
+          echo "::error::dry_run and recheck cannot be combined: a recheck reads the published suite back and then purges and tests it. Set dry_run to false for a recheck."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
+
+      # A recheck changes nothing, so it needs no signing key.
+      - name: Import signing key
+        if: ${{ !inputs.dry_run && !inputs.recheck }}
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: scripts/import-signing-key.sh
+
+      - name: Move
+        id: move
+        run: |
+          # The plan goes to stderr and the published snapshots to stdout.
+          # pipefail (defaults above) makes a failed move fail the step.
+          args=(--report "$RUNNER_TEMP/report.tsv")
+          if [[ $CODENAME != all ]]; then args+=(--codename "$CODENAME"); fi
+          if [[ $RECHECK == true ]]; then
+            args+=(--recheck)
+          elif [[ $DRY_RUN == true ]]; then
+            args+=(--dry-run)
+          fi
+          scripts/move.sh "${args[@]}" 2>&1 >"$RUNNER_TEMP/moved.txt" | tee "$RUNNER_TEMP/move.log"
+          # Empty for a dry run and for a move with nothing to do; a recheck
+          # prints every published codename, so the purge and the canary run.
+          echo "codenames=$(cut -d' ' -f1 "$RUNNER_TEMP/moved.txt" | xargs)" >>"$GITHUB_OUTPUT"
+          {
+            if [[ $RECHECK == true ]]; then
+              echo "### Recheck (nothing changed)"
+            elif [[ $DRY_RUN == true ]]; then
+              echo "### Move plan (dry run, nothing changed)"
+            else
+              echo "### Move"
+            fi
+            if [[ $RECHECK != true ]]; then
+              echo
+              echo '```'
+              grep -E '^(move |nothing to move in )' "$RUNNER_TEMP/move.log" || echo 'nothing to move'
+              echo '```'
+            fi
+            if [[ -s $RUNNER_TEMP/moved.txt ]]; then
+              echo
+              echo '| Codename | Snapshots |'
+              echo '| --- | --- |'
+              # shellcheck disable=SC2016 # literal Markdown backticks
+              sed 's/^\([^ ]*\) \(.*\)$/| \1 | `\2` |/' "$RUNNER_TEMP/moved.txt"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # Nothing is published, so nothing is purged or installed, for a dry
+      # run and for a move with nothing to do (no codename, an empty report).
+      # A move that a retry found already done is verified and printed, and a
+      # recheck prints its codenames, so both run these steps.
+      - name: Purge CDN cache
+        if: ${{ !inputs.dry_run && steps.move.outputs.codenames != '' }}
+        env:
+          CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PUBLISHED: ${{ steps.move.outputs.codenames }}
+        run: |
+          # shellcheck disable=SC2086 # one argument per codename
+          scripts/purge-cache.sh $PUBLISHED
+
+      - name: Install canary through the public endpoint
+        if: ${{ !inputs.dry_run && steps.move.outputs.codenames != '' }}
+        run: |
+          # Allow the CDN a moment after the purge before failing.
+          for attempt in 1 2 3; do
+            if scripts/apt-canary.sh --report "$RUNNER_TEMP/report.tsv"; then
+              exit 0
+            fi
+            echo "canary attempt $attempt failed; retrying" >&2
+            sleep 30
+          done
+          exit 1

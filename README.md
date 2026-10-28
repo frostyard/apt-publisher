@@ -67,7 +67,9 @@ Each run restores it, as on a fresh runner, and saves it back:
 - `db/`: aptly's database. Replaced files are kept under `history/`.
 - `pool/`: aptly's package pool, append-only.
 - `txn/`: pending markers recording the snapshot a publication was about to
-  make visible, one per component (`pending-trixie`, `pending-trixie-image`).
+  make visible, one per component (`pending-trixie`, `pending-trixie-image`),
+  and a move marker while a move runs (`move-trixie`; see
+  [Moving packages between components](#moving-packages-between-components)).
 
 ### Keeping state and bucket in step
 
@@ -193,11 +195,17 @@ How it works:
   the ones without packages start empty.
 - A publication switches only its producer's component, in one `Release`.
 - A rollback takes one snapshot per component; a component the codename does
-  not publish yet is added empty.
+  not publish yet is added empty. It refuses a snapshot that puts a package
+  name in a component other than its producer's registered one (see
+  [Moving packages between components](#moving-packages-between-components)).
 
-`trixie` and `forky` publish `main,image`. Every producer is still `main`,
-and no producer moves in this change: ADR-0059 step 5 moves bootc-debian and
-incus to `image` later, with a move workflow.
+`trixie` and `forky` publish `main,image`. frostyard/bootc-debian (`bootc`,
+`libostree-1-1`) and frostyard/incus (`incus`, `incus-base`, `incus-client`,
+`incus-extra`, `incus-ui-canonical`) are registered for `image` (ADR-0059
+step 5): their builds replace Debian packages of the same name, or depend on
+those replacements (`bootc`, `incus-ui-canonical`). Every other
+producer is `main`. The versions they published to `main` before the
+registration move with the move workflow below.
 
 The live codenames published `main` only. The first publication run after
 this change adds each missing configured component to them, empty: it writes
@@ -206,6 +214,65 @@ That run can be a publication, a withdrawal, a rollback or an import, and a
 publication also adds the component to the codenames it does not target.
 Later runs switch as before. `publish switch` cannot add a component, and a
 configuration that removes a component from a published codename is refused.
+
+### Moving packages between components
+
+When a producer's registration changes component, the **move** workflow
+(`scripts/move.sh`) moves its published packages to the new component:
+
+- It moves every published version of every architecture whose component
+  differs from its producer's registration. Names without a registered
+  producer stay where they are. No package version changes.
+- Each codename gets one publication: the names leave one component and
+  appear in the other in one signed `Release`, as one recoverable
+  transaction like any publication.
+- It runs in the `apt-repository` concurrency group. **Run it with
+  `dry_run` first**: it prints the plan, one
+  `move CODENAME NAME VERSION ARCH FROM -> TO` line per package, and changes
+  nothing. The live run reads the result back (deep check), purges the CDN
+  cache and runs the canary on the newest moved version of each package.
+- **A move that dies is settled by the next run.** A move changes two
+  components and saves its repositories before it publishes, so it writes a
+  move marker first (`txn/move-CODENAME`) and saves it **before it moves any
+  repository**. The marker holds one `component snapshot` line per changed
+  component, with the names the new snapshots will get, and one
+  `row NAME VERSION ARCH FROM TO` line per moved package. It is removed only
+  after the deep read-back passes. The next run of any script reconciles
+  first:
+  - If the move became visible, it completes it and drops the marker.
+  - If the marker's snapshots are not published (they may not even exist),
+    it undoes the move: it rebuilds the changed working repositories from the
+    published snapshots, drops the marker, and logs that an interrupted move
+    was undone. Run the move again.
+  Without this, a publication that waited in the queue would switch one
+  component only and strand the move in the other: the names would leave
+  `main` and never reach `image`. `switch.sh --list` prints a marker as
+  `move pending: CODENAME component=snapshot ...`, and `switch.sh --force`
+  drops it.
+- **A retry of a recovered move is not silent.** When the reconciliation of a
+  `move.sh` run completes an earlier move, that run reads it back with the
+  deep check, prints its codename and writes its report rows, so the
+  workflow purges the CDN cache and runs the canary.
+- **If a step after Move fails, or a retry is green with nothing to move, run
+  the workflow with `recheck=true`** (and `dry_run=false`). `move.sh
+  --recheck` changes nothing and needs no signing key: it runs the deep
+  read-back, prints each published codename with its snapshots, and reports
+  the newest version of each package in `image`. The workflow then purges the
+  cache and runs the canary. A dry run and a recheck cannot be combined.
+- A missing or unreadable `config/producers.tsv` is an error: the move and the
+  rollback guard fail closed instead of reading it as "no registered producer".
+- It starts from what the bucket serves: a working repository that differs
+  from its published snapshot is refused. `--rebuild` rebuilds it from the
+  published snapshot after a run that died between saving and publishing.
+- **No pool file is deleted.** The files under `pool/main` stay; aptly
+  uploads copies under `pool/image`.
+- A publication between a registration change and the move fails on the
+  one-component rule; run it again after the move.
+- **Revert by a forward change.** Register the producer for its old
+  component and run the move again: it moves the names back. A snapshot
+  taken before a move is not a rollback target: `switch.sh` refuses it, also
+  with `--force`, because it would put a name back in the component its
+  producer left.
 
 Clients:
 
@@ -291,7 +358,9 @@ legacy `/public.key` stays unchanged and is not touched.
     expected, and the audit never republishes.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
-  spaces. A codename that publishes only `main` takes one.
+  spaces. A codename that publishes only `main` takes one. Snapshots that
+  put a name in a component other than its producer's registered one, such
+  as snapshots from before a move, are refused.
   - It publishes those snapshots and rebuilds the working repositories from
     them, so later releases build on the rolled-back contents.
   - Everything published to that codename after the snapshots is
@@ -299,6 +368,9 @@ legacy `/public.key` stays unchanged and is not touched.
     roll it forward.
   - With the snapshot left empty, it lists snapshots, publications and
     pending markers instead.
+- **Move packages between components:** run **move** (`dry_run` is the
+  default) after changing a producer's `component`; see
+  [Moving packages between components](#moving-packages-between-components).
 - **Recovery:** when a run refuses because the bucket doesn't match aptly's
   database, inspect what changed first.
   - Then run **rollback** with `force` and the snapshots the bucket should

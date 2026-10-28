@@ -47,7 +47,7 @@ awk -F'\t' 'FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 # environment) queues in the one writer group, keeping up to 100 pending runs
 # instead of GitHub's default of one. The writers must be among them.
 uses_env() { grep -q '^ *environment: apt-repository$' "$1"; }
-for workflow in publish import-stable rollback withdraw; do
+for workflow in publish import-stable rollback withdraw move; do
 	uses_env "$ROOT/.github/workflows/$workflow.yml" ||
 		fail "$workflow.yml must use the apt-repository environment"
 done

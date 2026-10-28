@@ -13,12 +13,16 @@
 # a component); otherwise the codename needs a snapshot for every component,
 # and a codename that aptly does not publish yet needs all of them.
 #
+# A snapshot that puts a package name in a component other than its
+# producer's registered one (a snapshot taken before move.sh moved it) is
+# refused, also with --force: revert a move by a forward change.
+#
 # To pull a single version instead, use withdraw.sh.
 #
 # --force skips reconcile_state and lets aptly overwrite pool files whose
 # bucket copy differs: it replaces whatever the bucket serves for CODENAME
 # with aptly's view. Use it only to recover after inspecting a refusal.
-# --list prints snapshots, publications and pending markers instead.
+# --list prints snapshots, publications, and pending and move markers instead.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -50,6 +54,10 @@ if ((list)); then
 	aptly_init
 	aptly_ publish list
 	aptly_ snapshot list -sort=time
+	for f in "$APTLY_ROOT"/txn/move-*; do
+		[[ -f $f ]] || continue
+		printf 'move pending: %s %s\n' "${f##*/move-}" "$(awk '$1 != "row" && NF >= 2 { printf "%s%s=%s", sep, $1, $2; sep = " " }' "$f")"
+	done
 	for f in "$APTLY_ROOT"/txn/pending-*; do
 		[[ -f $f ]] || continue
 		marker=${f##*/pending-}
@@ -93,9 +101,28 @@ if ((${#given[@]} > 1)); then
 		LC_ALL=C sort | uniq -d)
 	[[ -z $overlap ]] || die "the snapshots publish ${overlap//$'\n'/ } in more than one component; pick snapshots that keep one name in one component"
 fi
+# A snapshot taken before a move puts a name in the component its producer
+# left (core ADR-0059). Publishing it would undo the move, and the next
+# publication would then fail on the one-component rule, so it is refused,
+# with or without --force. The move is reverted by a forward change. Names
+# without a registered producer are not judged.
+for component in "${given[@]}"; do
+	snapshot=${by_component[$component]}
+	snapshot_pkgs=$(snapshot_names "$snapshot")
+	while IFS= read -r name; do
+		[[ -n $name ]] || continue
+		registered=$(registered_component "$name")
+		[[ -z $registered || $registered == "$component" ]] ||
+			die "$snapshot puts $name in $component, but its producer is registered for $registered; a snapshot taken before a move is not a rollback target (core ADR-0059); revert a move by a forward change (registration plus move.sh)"
+	done <<<"$snapshot_pkgs"
+done
 if ((force)); then
 	log "warning: --force: not reconciling $codename with the bucket; overwriting differing pool files"
 	drop_pending "$codename"
+	if [[ -f $(move_file "$codename") ]]; then
+		log "warning: --force: dropping the move marker of $codename; its working repositories are rebuilt only for the snapshots you give"
+		drop_move "$codename"
+	fi
 	# shellcheck disable=SC2034 # read by publish_snapshot in lib.sh
 	force_overwrite=1
 else
