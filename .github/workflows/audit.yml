@@ -42,6 +42,8 @@ jobs:
       - name: Debian names in main
         # Also when the producer audit failed: the two reports are independent.
         if: ${{ !cancelled() }}
+        # bash with pipefail, so a failing script is not hidden by tee.
+        shell: bash
         run: |
           if ! scripts/audit-debian-names.sh | tee "$RUNNER_TEMP/debian-names.txt"; then
             {

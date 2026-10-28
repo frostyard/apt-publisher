@@ -701,7 +701,13 @@ done
 # Installer udebs (COMPONENT/debian-installer/) are not host packages: a
 # Frostyard name there is not reported.
 mkindex "$debmirror" trixie main/debian-installer amd64 frostyard-updex
-for suite in trixie trixie-updates forky forky-updates; do mkrelease "$debmirror" "$suite"; done
+# Another Debian component counts: contrib is reported. An architecture that
+# the codename does not publish does not: i386 is read by no configured host.
+# A present -backports suite is reported too.
+mkindex "$debmirror" trixie contrib amd64 incus-base
+mkindex "$debmirror" trixie main i386 incus-client
+mkindex "$debmirror" trixie-backports main amd64 incus-extra
+for suite in trixie trixie-updates trixie-backports forky forky-updates; do mkrelease "$debmirror" "$suite"; done
 for suite in trixie-security forky-security; do mkrelease "$debsec" "$suite"; done
 
 scope debnames
@@ -709,6 +715,7 @@ export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/produ
 mkdeb "$tmp/dn-updex" frostyard-updex 1.0 amd64
 mkdeb "$tmp/dn-thing" trixie-thing 1.0 amd64
 mkdeb "$tmp/dn-incus" incus '1:7.5.1-debian13-202610031200' amd64
+for name in incus-base incus-client incus-extra; do mkdeb "$tmp/dn-incus" "$name" '1:7.5.1-debian13-202610031200' amd64; done
 mkdeb "$tmp/dn-img" imgpkg 1.0 amd64
 must_pass "publish updex for the Debian-name audit" run publish.sh --producer frostyard/updex --debs "$tmp/dn-updex"
 must_pass "publish trixie-thing for the Debian-name audit" run publish.sh --producer frostyard/trixie-only --debs "$tmp/dn-thing"
@@ -728,8 +735,14 @@ check "a name in the security suite only is reported with -security" \
 check "a Frostyard-only name is not reported, also when an installer udeb has it" \
 	absent frostyard-updex "$tmp/out"
 check "a Debian name in image is not reported" absent imgpkg "$tmp/out"
-check "a missing suite is skipped" grep -q 'trixie-backports does not exist' "$tmp/err"
-check "the findings are the only output" test "$(wc -l <"$tmp/out")" = 2
+check "a name in another Debian component is reported" \
+	grep -qx 'DEBIAN-NAME trixie incus-base trixie' "$tmp/out"
+check "a name in a present -backports suite is reported with -backports" \
+	grep -qx 'DEBIAN-NAME trixie incus-extra trixie-backports' "$tmp/out"
+check "a name only in an architecture the codename does not publish is not reported" \
+	absent incus-client "$tmp/out"
+check "a missing suite is skipped" grep -q 'forky-backports does not exist' "$tmp/err"
+check "the findings are the only output" test "$(wc -l <"$tmp/out")" = 4
 
 # A hash that does not match the Release is fatal, not "no names".
 cp -r "$debmirror" "$tmp/debmirror-bad"
@@ -740,6 +753,56 @@ must_fail "a Packages.xz that does not match its Release hash fails the audit" \
 # A failed fetch other than a missing suite is fatal too.
 must_fail "an unreachable mirror fails the audit" "cannot fetch" \
 	env APT_DEBIAN_MIRROR=http://127.0.0.1:1 APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"
+
+# bad_index MIRROR-COPY CONTENT... replaces trixie's main/amd64 index with the
+# bytes from stdin, compressed or not as the caller made them, and fixes the
+# Release hash so only the content is wrong.
+bad_index() {
+	local copy=$1 file=$1/dists/trixie/main/binary-amd64/Packages.xz hash size
+	rm -rf "$copy"
+	cp -r "$debmirror" "$copy"
+	cat >"$file"
+	hash=$(sha256sum <"$file" | cut -d' ' -f1)
+	size=$(stat -c %s "$file")
+	sed -i "s#^ [0-9a-f]\{64\} [0-9]* main/binary-amd64/Packages.xz\$# $hash $size main/binary-amd64/Packages.xz#" \
+		"$copy/dists/trixie/Release"
+}
+# bad_release CONTENT... writes stdin as trixie's Release in a copy.
+bad_release() {
+	rm -rf "$1"
+	cp -r "$debmirror" "$1"
+	cat >"$1/dists/trixie/Release"
+}
+debnames_with() { env APT_DEBIAN_MIRROR=file://"$1" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"; }
+
+printf 'this is not xz' | bad_index "$tmp/dm-notxz"
+must_fail "an invalid xz index with a matching hash fails the audit" "is not valid xz" debnames_with "$tmp/dm-notxz"
+printf 'Version: 1\nArchitecture: all\n\n' | xz -c | bad_index "$tmp/dm-nopkg"
+must_fail "a Debian index whose stanza lacks Package fails the audit" "stanza without a Package field" debnames_with "$tmp/dm-nopkg"
+printf '<html><body>Error</body></html>\n' | xz -c | bad_index "$tmp/dm-html-index"
+must_fail "an HTML error page as a Debian index fails the audit" "stanza without a Package field" debnames_with "$tmp/dm-html-index"
+printf '<html><body>Not found</body></html>\n' | bad_release "$tmp/dm-html"
+must_fail "an HTML page as a Release fails the audit" "is not a Release file" debnames_with "$tmp/dm-html"
+bad_release "$tmp/dm-empty" </dev/null
+must_fail "an empty Release fails the audit" "is not a Release file" debnames_with "$tmp/dm-empty"
+printf 'Suite: trixie\nComponents: main\n' | bad_release "$tmp/dm-nosha"
+must_fail "a Release without a SHA256 section fails the audit" "is not a Release file" debnames_with "$tmp/dm-nosha"
+printf 'Suite: trixie\nSHA256:\n abc 12 main/binary-amd64/Packages.xz\n' | bad_release "$tmp/dm-badline"
+must_fail "a Release with a malformed SHA256 line fails the audit" "is not a Release file" debnames_with "$tmp/dm-badline"
+printf 'Suite: trixie\nSHA256:\n %064d 0 main/Contents-amd64.gz\n' 0 | bad_release "$tmp/dm-noindex"
+must_fail "a Release that lists no index for our architectures fails the audit" "lists no Packages.xz" debnames_with "$tmp/dm-noindex"
+
+# Frostyard's own index must be a Packages index too.
+rm -rf "$tmp/pub-html"
+cp -r "$pub" "$tmp/pub-html"
+printf '<html><body>Error</body></html>\n' >"$tmp/pub-html/dists/trixie/main/binary-amd64/Packages"
+must_fail "an HTML page as Frostyard's index fails the audit" "is not a Packages index" \
+	env APT_PUBLIC_URL=file://"$tmp/pub-html" "$ROOT/scripts/audit-debian-names.sh"
+must_fail "a missing codenames file fails the audit" "cannot read" \
+	env APT_CODENAMES_FILE="$tmp/no-such-codenames.tsv" "$ROOT/scripts/audit-debian-names.sh"
+printf '# only a comment\n' >"$tmp/codenames-empty.tsv"
+must_fail "a codenames file without a codename fails the audit" "lists no codename" \
+	env APT_CODENAMES_FILE="$tmp/codenames-empty.tsv" "$ROOT/scripts/audit-debian-names.sh"
 
 # With no Debian name in main the audit passes.
 scope debnames-clean
