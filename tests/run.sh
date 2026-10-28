@@ -656,7 +656,11 @@ rm "$tmp/http-pub/$thing_pool"
 must_fail "a 404 fails the canary" "404" canary_http
 check "a 404 is not retried" test "$(retry_lines)" = 0
 printf 'corrupted bytes\n' >"$tmp/http-pub/$thing_pool"
-must_fail "a hash mismatch fails the canary" "apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 1 of 4)" canary_http
+must_fail "a size mismatch fails the canary" "apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 1 of 4)" canary_http
+check "a size mismatch is not retried" test "$(retry_lines)" = 0
+# Same size, other bytes: only the hash can tell.
+head -c "$(stat -c %s "$pub/$thing_pool")" /dev/zero >"$tmp/http-pub/$thing_pool"
+must_fail "a hash mismatch fails the canary" "Hash Sum mismatch" canary_http
 check "a hash mismatch is not retried" test "$(retry_lines)" = 0
 cp "$pub/$thing_pool" "$tmp/http-pub/$thing_pool"
 must_pass "the canary passes with the file restored" canary_http
@@ -668,6 +672,54 @@ must_fail "zero tries are refused" "APT_CANARY_TRIES must be an integer >= 1" ca
 must_fail "a negative timeout is refused" "APT_CANARY_TIMEOUT must be an integer" canary_http APT_CANARY_TIMEOUT=-1
 must_fail "a zero timeout is refused" "APT_CANARY_TIMEOUT must be an integer >= 1" canary_http APT_CANARY_TIMEOUT=0
 must_fail "a bad delay is refused" "APT_CANARY_DELAY must be an integer" canary_http APT_CANARY_DELAY=1s
+must_fail "a bad budget is refused" "APT_CANARY_BUDGET must be an integer >= 1" canary_http APT_CANARY_BUDGET=0
+# The budget is a hard limit: no pause starts that would outlast it, and
+# apt-get is stopped when it runs out.
+serve_ctl 'trixie-thing_1.1 stall 99'
+must_fail "the canary stops retrying when the budget is spent" "the canary budget of 6s is spent" \
+	canary_http APT_CANARY_BUDGET=6 APT_CANARY_DELAY=3
+must_fail "the budget stops a hanging apt-get" "the canary budget of 2s is spent; stopped" \
+	canary_http APT_CANARY_BUDGET=2 APT_CANARY_TIMEOUT=60
+serve_ctl
+
+# The error classes, with apt 2.7's wording (the CI runner's apt), through a
+# fake apt-get: update passes, download prints $SHIM_APT_LOG and fails.
+mkdir -p "$tmp/shim-apt"
+cat >"$tmp/shim-apt/apt-get" <<'EOF'
+#!/usr/bin/env bash
+for a; do [[ $a == --print-uris || $a == update ]] && exit 0; done
+echo $(($(cat "$SHIM_APT_COUNT" 2>/dev/null || echo 0) + 1)) >"$SHIM_APT_COUNT"
+cat "$SHIM_APT_LOG"
+exit 100
+EOF
+chmod +x "$tmp/shim-apt/apt-get"
+# apt_class DESC TRIES LOG... runs the canary against the fake apt-get with
+# that download log, and checks the number of download tries.
+apt_class() {
+	local desc=$1 want=$2
+	shift 2
+	printf '%s\n' "$@" >"$tmp/shim-apt.log"
+	rm -f "$tmp/shim-apt.count"
+	if env PATH="$tmp/shim-apt:$PATH" SHIM_APT_LOG="$tmp/shim-apt.log" SHIM_APT_COUNT="$tmp/shim-apt.count" \
+		APT_CANARY_TRIES=3 "$ROOT/scripts/apt-canary.sh" trixie amd64 v503=503 >"$tmp/out" 2>"$tmp/err"; then
+		not_ok "$desc (unexpectedly succeeded)"
+	fi
+	check "$desc" test "$(cat "$tmp/shim-apt.count")" = "$want"
+}
+url=https://repo.invalid/debian/pool/main/v/v503/v503_503_amd64.deb
+hdr='Err:1 https://repo.invalid/debian trixie/main amd64 v503 amd64 503'
+apt_class "a 404 for version 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  404  Not Found [IP: 192.0.2.1 443]"
+apt_class "a hash mismatch for version 503 is not retried" 1 "$hdr" '  Hash Sum mismatch' \
+	"E: Failed to fetch $url  Hash Sum mismatch"
+apt_class "a 503 is retried" 3 "$hdr" '  503  Service Unavailable [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  503  Service Unavailable [IP: 192.0.2.1 443]"
+apt_class "a Cloudflare 522 is retried" 3 "$hdr" '  522  <none> [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  522  <none> [IP: 192.0.2.1 443]"
+apt_class "an apt 2.7 timeout is retried" 3 "$hdr" '  Connection timed out [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  Connection timed out [IP: 192.0.2.1 443]"
+apt_class "a 404 on port 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192.0.2.1 503]' \
+	"E: Failed to fetch http://repo.invalid:503/x_503_amd64.deb  404  Not Found [IP: 192.0.2.1 503]"
 
 # Another writer's stanza, appended to the published index.
 {

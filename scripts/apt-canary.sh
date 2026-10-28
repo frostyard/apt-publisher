@@ -14,6 +14,10 @@
 #   APT_CANARY_TIMEOUT  apt http/https timeout, seconds, at least 1, connect and data (120)
 #   APT_CANARY_TRIES    tries per apt-get command, at least 1 (4)
 #   APT_CANARY_DELAY    seconds; the sleep before try n+1 is DELAY*n (30)
+#   APT_CANARY_BUDGET   seconds for the whole run, at least 1 (600). A hard
+#                       limit: apt-get and curl run under it, and the canary
+#                       fails rather than start a pause it cannot finish, so
+#                       it fails with its own log inside the job's time limit.
 # Retried: apt-get update on any failure (a stale index right after the CDN
 # purge is the known cause), and apt-get download only on a transient network
 # error (see transient). Never retried: a 404, a hash or size mismatch, a bad
@@ -25,7 +29,7 @@
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
-require apt-get curl
+require apt-get curl timeout
 
 # tunable NAME DEFAULT MIN prints the value of environment variable NAME.
 tunable() {
@@ -38,22 +42,51 @@ tunable() {
 timeout=$(tunable APT_CANARY_TIMEOUT 120 1)
 tries=$(tunable APT_CANARY_TRIES 4 1)
 delay=$(tunable APT_CANARY_DELAY 30 0)
+budget=$(tunable APT_CANARY_BUDGET 600 1)
+
+# left prints the seconds left in the budget; SECONDS counts from the start.
+left() { echo $((budget - SECONDS)); }
+
+# bounded LOG CMD... runs CMD with its output in LOG and the rest of the
+# budget as a hard limit, and returns CMD's status. It dies when the budget
+# is spent, before or during CMD.
+bounded() {
+	local out=$1 rest rc=0
+	shift
+	rest=$(left)
+	((rest > 0)) || die "the canary budget of ${budget}s is spent"
+	timeout -k 10 "$rest" "$@" >"$out" 2>&1 || rc=$?
+	((rc != 124 && rc != 137)) || die "the canary budget of ${budget}s is spent; stopped $*: $(cat "$out")"
+	return "$rc"
+}
+
+# fits_or_die SECONDS MESSAGE dies with MESSAGE when a pause of SECONDS
+# before the next try would outlast the budget.
+fits_or_die() {
+	(($1 < $(left))) || die "$2 (the canary budget of ${budget}s is spent)"
+}
 
 # transient LOG succeeds when the apt log shows a network error that can pass
 # on its own: a timeout, a connect, resolve or reset failure, or an HTTP 5xx
-# (Cloudflare 520-530 included) in an Err: or E: Failed to fetch line. A 404,
-# a hash or size mismatch and the like are not transient.
+# (Cloudflare 520-530 included). A 404, a hash or size mismatch and the like
+# are not transient.
 transient() {
 	grep -Eq 'Connection timed out|Could not connect|Connection failed|Temporary failure resolving|Could not resolve|Connection reset|Undetermined Error' "$1" && return 0
-	# Drop the URL and the [IP: ...] part, so that a 5xx in a name or an address is not a status.
-	grep -E '^(Err:|E: Failed to fetch)' "$1" |
-		sed -E 's/\[IP: [^]]*\]//; s#[A-Za-z0-9+.-]+://[^ ]*##' |
-		grep -Eq '(^|[[:space:]])5[0-9]{2}([[:space:]]|$)'
+	# The reason follows the URL in "E: Failed to fetch URL  REASON" and stands
+	# alone on the indented line after "Err:". Only a reason that starts with
+	# the status is read, never the Err: header with its version, nor a URL.
+	sed -nE 's/^E: Failed to fetch [^ ]+ +//p; s/^ +//p' "$1" | grep -Eq '^5[0-9]{2}([[:space:]]|$)'
 }
 
 # warm_up DIR OPTS... SPEC logs how the CDN serves the package URL. It never fails.
 warm_up() {
-	local d=$1 spec=${!#} uri out code time size cache
+	local d=$1 spec=${!#} uri out code time size cache max
+	max=$(left)
+	((max <= 300)) || max=300
+	if ((max < 1)); then
+		log "canary warm-up $spec: skipped, the budget is spent"
+		return 0
+	fi
 	uri=$(cd "$d/download" && apt-get "${@:2:$#-2}" -q --print-uris download "$spec" 2>/dev/null |
 		sed -n "s/^'\([^']*\)'.*/\1/p" | head -n 1) || uri=''
 	if [[ -z $uri ]]; then
@@ -61,7 +94,7 @@ warm_up() {
 		return 0
 	fi
 	: >"$d/warm.hdr"
-	out=$(curl -sS -o /dev/null --max-time 300 --speed-limit 1 --speed-time 120 -D "$d/warm.hdr" \
+	out=$(curl -sS -o /dev/null --max-time "$max" --speed-limit 1 --speed-time 120 -D "$d/warm.hdr" \
 		-w '%{http_code} %{time_total} %{size_download}' "$uri" 2>"$d/warm.err") || log "canary warm-up curl failed: $(cat "$d/warm.err")"
 	read -r code time size <<<"$out" || true
 	cache=$(awk -F': *' 'tolower($1) == "cf-cache-status" { gsub(/\r/, "", $2); v = $2 } END { print v }' "$d/warm.hdr") || cache=''
@@ -93,12 +126,13 @@ canary() {
 		-o Acquire::Retries=0 -o "Acquire::http::Timeout=$timeout" -o "Acquire::https::Timeout=$timeout")
 	local try=1 first pause
 	while :; do
-		if apt-get "${opts[@]}" -q update >"$d/update.log" 2>&1 && ! grep -q '^[WE]:' "$d/update.log"; then
+		if bounded "$d/update.log" apt-get "${opts[@]}" -q update && ! grep -q '^[WE]:' "$d/update.log"; then
 			break
 		fi
 		((try < tries)) || die "apt-get update of $target/$arch failed (try $try of $tries): $(cat "$d/update.log")"
 		first=$(grep -m1 '^[WE]:' "$d/update.log" || tail -n 1 "$d/update.log")
 		pause=$((delay * try))
+		fits_or_die "$pause" "apt-get update of $target/$arch failed (try $try of $tries): $(cat "$d/update.log")"
 		log "canary: apt-get update of $target/$arch failed (try $try of $tries): $first; retrying in ${pause}s"
 		sleep "$pause"
 		try=$((try + 1))
@@ -107,7 +141,7 @@ canary() {
 		warm_up "$d" "${opts[@]}" "$spec" || true
 		try=1
 		while :; do
-			if (cd "$d/download" && apt-get "${opts[@]}" -q download "$spec") >"$d/download.log" 2>&1; then
+			if bounded "$d/download.log" env -C "$d/download" apt-get "${opts[@]}" -q download "$spec"; then
 				break
 			fi
 			if ! transient "$d/download.log" || ((try >= tries)); then
@@ -115,6 +149,7 @@ canary() {
 			fi
 			first=$(grep -m1 '^E:' "$d/download.log" || tail -n 1 "$d/download.log")
 			pause=$((delay * try))
+			fits_or_die "$pause" "apt-get download $spec from $target/$arch failed (try $try of $tries): $(cat "$d/download.log")"
 			log "canary: apt-get download $spec from $target/$arch failed (try $try of $tries): $first; retrying in ${pause}s"
 			sleep "$pause"
 			try=$((try + 1))
