@@ -98,15 +98,20 @@ snapshot_component() {
 # when producers registered for different components match NAME: no component
 # is then right, and a move or a rollback must not guess.
 registered_component() {
-	local repo patterns component found='' found_repo=''
+	local repo patterns component found='' found_repo='' rows
+	# Read the file with a checked command: a missing or unreadable file
+	# must not read as "no registered producer".
+	rows=$(awk -F'\t' '!/^#/ && NF' "$APT_PRODUCERS_FILE") ||
+		die "cannot read the producers file $APT_PRODUCERS_FILE"
 	while IFS=$'\t' read -r repo patterns _ _ _ component; do
+		[[ -n $patterns ]] || continue
 		matches_globs "$1" "$patterns" || continue
 		if [[ -n $found && $found != "$component" ]]; then
 			die "producers $found_repo ($found) and $repo ($component) register $1 for different components; fix config/producers.tsv"
 		fi
 		found=$component
 		found_repo=$repo
-	done < <(awk -F'\t' '!/^#/ && NF' "$APT_PRODUCERS_FILE")
+	done <<<"$rows"
 	[[ -z $found ]] || printf '%s\n' "$found"
 }
 
@@ -169,11 +174,16 @@ aptly_init() {
 #   txn/   pending-<codename> (main) and pending-<codename>-image: the
 #          snapshot a publication was about to make visible, so an interrupted
 #          run can be completed (reconcile_state).
-#          move-<codename>: written by move.sh (one "component snapshot" line
-#          for each component it changes) before its publication, and removed
-#          after it. A move changes two components, so a run that publishes
-#          one component only must not find them half moved: reconcile_state
-#          undoes a move that never became visible (settle_move).
+#          move-<codename>: written by move.sh and saved FIRST, while the
+#          database holds no moved repository (state_save writes the database
+#          before the markers, so a marker saved with the repositories could
+#          be lost). One "component snapshot" line for each component it
+#          changes, with the names its snapshots will get, and one
+#          "row NAME VERSION ARCH FROM TO" line for each moved package. It is
+#          removed after the publication. A move changes two components, so
+#          a run that publishes one component only must not find them half
+#          moved: reconcile_state undoes a move whose snapshots are not
+#          published, also when they do not exist (settle_move).
 
 state_remote() { printf 'r2:%s/%s' "$APT_STATE_BUCKET" "$APT_STATE_PATH"; }
 
@@ -449,8 +459,10 @@ settle_move() {
 	local -a comps=() snaps=()
 	f=$(move_file "$codename")
 	[[ -f $f ]] || return 0
-	while read -r component snapshot; do
-		[[ -n $component ]] || continue
+	# "component snapshot" lines; the "row ..." lines (the plan, which
+	# move.sh reads) are not this function's.
+	while read -r component snapshot _; do
+		[[ -n $component && $component != row ]] || continue
 		comps+=("$component")
 		snaps+=("$snapshot")
 	done <"$f"

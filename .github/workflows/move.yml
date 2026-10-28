@@ -5,6 +5,9 @@
 # and the files under the old pool path stay. The move changes no package
 # version, so it notifies nobody. Revert a move by a forward change: register
 # the producer for its old component, then run this workflow again.
+# If a step after Move fails, or a retry is green with nothing to move, run it
+# with recheck=true (and dry_run=false): it changes nothing, reads the
+# published suite back, then purges the CDN cache and runs the canary.
 name: move
 
 on:
@@ -19,6 +22,10 @@ on:
         description: Print the plan and change nothing
         type: boolean
         default: true
+      recheck:
+        description: Change nothing; read the published suite back, then purge the CDN cache and run the canary (set dry_run to false). Use it when a step after Move failed, or a retry was green with nothing to move
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,17 +53,25 @@ jobs:
       # Request values reach scripts only through the environment.
       CODENAME: ${{ inputs.codename }}
       DRY_RUN: ${{ inputs.dry_run }}
+      RECHECK: ${{ inputs.recheck }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
     steps:
+      - name: Refuse a dry run that is also a recheck
+        if: ${{ inputs.dry_run && inputs.recheck }}
+        run: |
+          echo "::error::dry_run and recheck cannot be combined: a recheck reads the published suite back and then purges and tests it. Set dry_run to false for a recheck."
+          exit 1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
 
+      # A recheck changes nothing, so it needs no signing key.
       - name: Import signing key
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && !inputs.recheck }}
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
         run: scripts/import-signing-key.sh
@@ -68,20 +83,29 @@ jobs:
           # pipefail (defaults above) makes a failed move fail the step.
           args=(--report "$RUNNER_TEMP/report.tsv")
           if [[ $CODENAME != all ]]; then args+=(--codename "$CODENAME"); fi
-          if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
+          if [[ $RECHECK == true ]]; then
+            args+=(--recheck)
+          elif [[ $DRY_RUN == true ]]; then
+            args+=(--dry-run)
+          fi
           scripts/move.sh "${args[@]}" 2>&1 >"$RUNNER_TEMP/moved.txt" | tee "$RUNNER_TEMP/move.log"
-          # Empty for a dry run and for a move with nothing to do.
+          # Empty for a dry run and for a move with nothing to do; a recheck
+          # prints every published codename, so the purge and the canary run.
           echo "codenames=$(cut -d' ' -f1 "$RUNNER_TEMP/moved.txt" | xargs)" >>"$GITHUB_OUTPUT"
           {
-            if [[ $DRY_RUN == true ]]; then
+            if [[ $RECHECK == true ]]; then
+              echo "### Recheck (nothing changed)"
+            elif [[ $DRY_RUN == true ]]; then
               echo "### Move plan (dry run, nothing changed)"
             else
               echo "### Move"
             fi
-            echo
-            echo '```'
-            grep -E '^(move |nothing to move in )' "$RUNNER_TEMP/move.log" || echo 'nothing to move'
-            echo '```'
+            if [[ $RECHECK != true ]]; then
+              echo
+              echo '```'
+              grep -E '^(move |nothing to move in )' "$RUNNER_TEMP/move.log" || echo 'nothing to move'
+              echo '```'
+            fi
             if [[ -s $RUNNER_TEMP/moved.txt ]]; then
               echo
               echo '| Codename | Snapshots |'
@@ -93,6 +117,8 @@ jobs:
 
       # Nothing is published, so nothing is purged or installed, for a dry
       # run and for a move with nothing to do (no codename, an empty report).
+      # A move that a retry found already done is verified and printed, and a
+      # recheck prints its codenames, so both run these steps.
       - name: Purge CDN cache
         if: ${{ !inputs.dry_run && steps.move.outputs.codenames != '' }}
         env:
