@@ -596,6 +596,8 @@ commit_publications() {
 	local spec key codename component
 	local -a order=() pairs=()
 	local -A groups=()
+	# First, so that a failed upload changes no state (core ADR-0059).
+	publish_key
 	for spec in "$@"; do
 		key=${spec%%=*}
 		[[ $key == */* ]] || die "invalid publication $spec (expected CODENAME/COMPONENT=SNAPSHOT)"
@@ -697,5 +699,48 @@ verify_published() {
 			die "$codename references pool files the bucket does not hold intact"
 	fi
 	rm -rf -- "$tmp"
+	verify_key
 	log "verified $codename${*:+: $*}"
+}
+
+# --- published key (core ADR-0059) -----------------------------------------------
+#
+# The binary keyring keys/frostyard.gpg is served at debian/frostyard.gpg, and
+# hosts install it as /etc/apt/keyrings/frostyard.gpg. The object sits outside
+# dists/ and pool/, so aptly never touches it, and this repository is its only
+# writer: no other workflow, script or tool may write it.
+
+key_object() { printf 'r2:%s/%s/frostyard.gpg' "$APT_BUCKET" "$APT_PREFIX"; }
+
+# bucket_key_matches reports whether the bucket's key object is readable and
+# byte-identical to $APT_KEYRING.
+bucket_key_matches() {
+	local tmp rc=0
+	tmp=$(mktemp)
+	if rclone cat "$(key_object)" >"$tmp" 2>/dev/null; then
+		cmp -s -- "$tmp" "$APT_KEYRING" || rc=1
+	else
+		rc=1
+	fi
+	rm -f -- "$tmp"
+	return "$rc"
+}
+
+# publish_key uploads the keyring when the bucket copy is missing, unreadable
+# or different, then reads it back and compares the bytes.
+publish_key() {
+	[[ -f $APT_KEYRING ]] || die "cannot read the keyring $APT_KEYRING"
+	if bucket_key_matches; then
+		log "published key is current"
+		return 0
+	fi
+	rclone copyto "$APT_KEYRING" "$(key_object)" || die "cannot upload the key to $(key_object)"
+	bucket_key_matches || die "the key in the bucket differs from $APT_KEYRING after the upload"
+	log "uploaded the published key"
+}
+
+# verify_key reads the key object back, changing nothing, and dies when it is
+# missing or differs from $APT_KEYRING.
+verify_key() {
+	bucket_key_matches || die "the published key $(key_object) is missing or differs from $APT_KEYRING"
 }
