@@ -17,8 +17,10 @@ done
 
 tmp=$(mktemp -d)
 server_pid=''
+http_pid=''
 cleanup() {
 	[[ -n $server_pid ]] && kill "$server_pid" 2>/dev/null
+	[[ -n $http_pid ]] && kill "$http_pid" 2>/dev/null
 	GNUPGHOME=$tmp/gnupg gpgconf --kill gpg-agent 2>/dev/null || true
 	if [[ -n ${KEEP_TMP:-} ]]; then
 		echo "kept $tmp" >&2
@@ -27,6 +29,9 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT
+
+# The canary tests run without the pause between tries.
+export APT_CANARY_DELAY=0
 
 n=0
 ok() {
@@ -559,6 +564,174 @@ must_pass "switch --force repairs the pool file" \
 	run switch.sh --codename trixie --snapshot "$trixie_snapshot" --force
 must_pass "deep verify passes after the repair" run verify.sh trixie --deep
 must_pass "the canary passes after the repair" run apt-canary.sh trixie amd64 trixie-thing=1.1
+
+# --- canary retry policy over HTTP -----------------------------------------------------
+#
+# A copy of the published scope is served by a small handler. $tmp/http-ctl lists
+# "SUBSTRING MODE N" rows: apt's first N GETs of a path with SUBSTRING get a 503
+# (MODE 503) or stall for 4 s (MODE stall), which is longer than the timeout.
+# apt reconnects once by itself after a timeout: a try needs two stalls to fail. The
+# curl warm-up is never counted; MODE warmstall stalls only the warm-up, for
+# 6 s. The first row is a sequence number: a new one resets the counters.
+cp -r "$pub" "$tmp/http-pub"
+cat >"$tmp/http-server.py" <<'EOF'
+import functools, http.server, sys, threading, time
+
+ctl, hits, lock = sys.argv[3], {}, threading.Lock()
+seen = None
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+	def do_GET(self):
+		global seen
+		rows = []
+		try:
+			with open(ctl) as f:
+				rows = f.read().splitlines()
+		except OSError:
+			pass
+		if rows[:1] != seen:
+			seen = rows[:1]
+			hits.clear()
+		apt = self.headers.get("User-Agent", "").startswith("Debian APT")
+		if not apt and any(r.split()[1:2] == ["warmstall"] and r.split()[0] in self.path for r in rows[1:]):
+			time.sleep(6)
+			return
+		if apt:
+			for row in rows[1:]:
+				sub, mode, n = row.split()
+				if mode == "warmstall":
+					continue
+				if sub in self.path:
+					with lock:
+						hits[row] = hits.get(row, 0) + 1
+						over = hits[row] > int(n)
+					if not over:
+						if mode == "503":
+							return self.send_error(503)
+						time.sleep(4)
+						return
+		return super().do_GET()
+
+	def log_message(self, *args):
+		pass
+
+class Server(http.server.ThreadingHTTPServer):
+	daemon_threads = True
+	def handle_error(self, *args):
+		pass
+
+Server(("127.0.0.1", int(sys.argv[1])), functools.partial(Handler, directory=sys.argv[2])).serve_forever()
+EOF
+http_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+: >"$tmp/http-ctl"
+python3 "$tmp/http-server.py" "$http_port" "$tmp/http-pub" "$tmp/http-ctl" &
+http_pid=$!
+for _ in $(seq 50); do
+	curl -fs -o /dev/null "http://127.0.0.1:$http_port/frostyard.gpg" && break
+	sleep 0.1
+done
+ctl_seq=0
+# serve_ctl ROW... writes the control rows under a new sequence number.
+serve_ctl() {
+	ctl_seq=$((ctl_seq + 1))
+	printf '%s\n' "$ctl_seq" "$@" >"$tmp/http-ctl"
+}
+thing_pool=$(cd "$pub" && find pool -name 'trixie-thing_1.1_amd64.deb')
+canary_http() { env APT_PUBLIC_URL="http://127.0.0.1:$http_port" APT_CANARY_TIMEOUT=2 "$@" "$ROOT/scripts/apt-canary.sh" trixie amd64 trixie-thing=1.1; }
+retry_lines() { grep -c 'canary: apt-get .* failed (try .*retrying in' "$tmp/err" || true; }
+
+serve_ctl
+must_pass "the canary installs over HTTP" canary_http
+check "the warm-up logs the URL, status and cache status" \
+	grep -q "canary warm-up http://127.0.0.1:$http_port/$thing_pool: HTTP 200, .*s, [1-9][0-9]* bytes, cf-cache-status -" "$tmp/err"
+check "a clean run logs no retry" test "$(retry_lines)" = 0
+serve_ctl 'trixie-thing_1.1 503 1'
+must_pass "the canary retries a 503 from the CDN" canary_http
+check "the 503 retry is logged" grep -q 'canary: apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 1 of 4):.*503.*; retrying in 0s' "$tmp/err"
+# apt 3 reconnects once by itself after a timeout, so two stalls make one failed try.
+serve_ctl 'trixie-thing_1.1 stall 2'
+must_pass "the canary retries a fetch that stalls past the timeout" canary_http
+check "the stall retry is logged" grep -q 'failed (try 1 of 4):.*; retrying in' "$tmp/err"
+check "the stall is a timeout" grep -q 'failed (try 1 of 4): E: .*Connection \(timed out\|failed\)' "$tmp/err"
+serve_ctl 'trixie-thing_1.1 503 99'
+must_fail "the canary fails when every fetch gives 503" "apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 3 of 3)" \
+	canary_http APT_CANARY_TRIES=3
+check "it tried TRIES times, no more" test "$(retry_lines)" = 2
+serve_ctl
+rm "$tmp/http-pub/$thing_pool"
+must_fail "a 404 fails the canary" "404" canary_http
+check "a 404 is not retried" test "$(retry_lines)" = 0
+printf 'corrupted bytes\n' >"$tmp/http-pub/$thing_pool"
+must_fail "a size mismatch fails the canary" "apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 1 of 4)" canary_http
+check "a size mismatch is not retried" test "$(retry_lines)" = 0
+# Same size, other bytes: only the hash can tell.
+head -c "$(stat -c %s "$pub/$thing_pool")" /dev/zero >"$tmp/http-pub/$thing_pool"
+must_fail "a hash mismatch fails the canary" "Hash Sum mismatch" canary_http
+check "a hash mismatch is not retried" test "$(retry_lines)" = 0
+cp "$pub/$thing_pool" "$tmp/http-pub/$thing_pool"
+must_pass "the canary passes with the file restored" canary_http
+must_fail "a bad signature fails the canary" "apt-get update of trixie/amd64 failed (try 3 of 3)" \
+	canary_http APT_KEYRING="$tmp/other-key.gpg" APT_CANARY_TRIES=3
+check "the update was tried TRIES times" test "$(retry_lines)" = 2
+must_fail "a bad tunable is refused" "APT_CANARY_TRIES must be an integer >= 1 (got: x)" canary_http APT_CANARY_TRIES=x
+must_fail "zero tries are refused" "APT_CANARY_TRIES must be an integer >= 1" canary_http APT_CANARY_TRIES=0
+must_fail "a negative timeout is refused" "APT_CANARY_TIMEOUT must be an integer" canary_http APT_CANARY_TIMEOUT=-1
+must_fail "a zero timeout is refused" "APT_CANARY_TIMEOUT must be an integer >= 1" canary_http APT_CANARY_TIMEOUT=0
+must_fail "a bad delay is refused" "APT_CANARY_DELAY must be an integer" canary_http APT_CANARY_DELAY=1s
+must_fail "a bad budget is refused" "APT_CANARY_BUDGET must be an integer >= 1" canary_http APT_CANARY_BUDGET=0
+# The budget is a hard limit: no pause starts that would outlast it, and
+# apt-get is stopped when it runs out.
+serve_ctl 'trixie-thing_1.1 stall 99'
+must_fail "the canary stops retrying when the budget is spent" "the canary budget of 6s is spent" \
+	canary_http APT_CANARY_BUDGET=6 APT_CANARY_DELAY=3
+must_fail "the budget stops a hanging apt-get" "the canary budget of 2s is spent; stopped" \
+	canary_http APT_CANARY_BUDGET=2 APT_CANARY_TIMEOUT=60
+# A stalled warm-up does not use the budget: apt still gets its time.
+serve_ctl 'trixie-thing_1.1 warmstall 99'
+must_pass "a stalled warm-up does not fail the canary" canary_http APT_CANARY_BUDGET=5
+check "the stalled warm-up is logged" grep -q 'canary warm-up curl failed' "$tmp/err"
+must_pass "the warm-up can be turned off" canary_http APT_CANARY_WARMUP=0
+check "a turned-off warm-up is logged" grep -q 'warm-up allowance is spent' "$tmp/err"
+serve_ctl
+
+# The error classes, with apt 2.7's wording (the CI runner's apt), through a
+# fake apt-get: update passes, download prints $SHIM_APT_LOG and fails.
+mkdir -p "$tmp/shim-apt"
+cat >"$tmp/shim-apt/apt-get" <<'EOF'
+#!/usr/bin/env bash
+for a; do [[ $a == --print-uris || $a == update ]] && exit 0; done
+echo $(($(cat "$SHIM_APT_COUNT" 2>/dev/null || echo 0) + 1)) >"$SHIM_APT_COUNT"
+cat "$SHIM_APT_LOG"
+exit 100
+EOF
+chmod +x "$tmp/shim-apt/apt-get"
+# apt_class DESC TRIES LOG... runs the canary against the fake apt-get with
+# that download log, and checks the number of download tries.
+apt_class() {
+	local desc=$1 want=$2
+	shift 2
+	printf '%s\n' "$@" >"$tmp/shim-apt.log"
+	rm -f "$tmp/shim-apt.count"
+	if env PATH="$tmp/shim-apt:$PATH" SHIM_APT_LOG="$tmp/shim-apt.log" SHIM_APT_COUNT="$tmp/shim-apt.count" \
+		APT_CANARY_TRIES=3 "$ROOT/scripts/apt-canary.sh" trixie amd64 v503=503 >"$tmp/out" 2>"$tmp/err"; then
+		not_ok "$desc (unexpectedly succeeded)"
+	fi
+	check "$desc" test "$(cat "$tmp/shim-apt.count")" = "$want"
+}
+url=https://repo.invalid/debian/pool/main/v/v503/v503_503_amd64.deb
+hdr='Err:1 https://repo.invalid/debian trixie/main amd64 v503 amd64 503'
+apt_class "a 404 for version 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  404  Not Found [IP: 192.0.2.1 443]"
+apt_class "a hash mismatch for version 503 is not retried" 1 "$hdr" '  Hash Sum mismatch' \
+	"E: Failed to fetch $url  Hash Sum mismatch"
+apt_class "a 503 is retried" 3 "$hdr" '  503  Service Unavailable [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  503  Service Unavailable [IP: 192.0.2.1 443]"
+apt_class "a Cloudflare 522 is retried" 3 "$hdr" '  522  <none> [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  522  <none> [IP: 192.0.2.1 443]"
+apt_class "an apt 2.7 timeout is retried" 3 "$hdr" '  Connection timed out [IP: 192.0.2.1 443]' \
+	"E: Failed to fetch $url  Connection timed out [IP: 192.0.2.1 443]"
+apt_class "a 404 on port 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192.0.2.1 503]' \
+	"E: Failed to fetch http://repo.invalid:503/x_503_amd64.deb  404  Not Found [IP: 192.0.2.1 503]"
 
 # Another writer's stanza, appended to the published index.
 {

@@ -33,7 +33,8 @@ producer tag ─► goreleaser ─► GitHub release (.deb + build provenance)
                         ─► clear pending + save ─► read back from the bucket
      purge-cache.sh     purge InRelease/Release/Packages from the Cloudflare cache
      apt-canary.sh      apt-get update + download of each new package through
-                        the public URL
+                        the public URL; retries a stale index and a transient
+                        fetch, fails at once on a 404 or a bad hash
      notify.sh          dispatch `build` to downstream repositories (snosi)
 ```
 
