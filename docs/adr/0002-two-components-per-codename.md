@@ -87,7 +87,9 @@ component differs from its producer's registration:
   `switch.sh --force` drops it. A later publication
   switches one component only, so it must never find a move half applied. A
   rerun of the move that finds its earlier move completed still reads it
-  back, purges the CDN and runs the canary;
+  back, purges the CDN and runs the canary, and the marker is removed only
+  after the deep read-back passes. A read-only recheck repeats the read-back,
+  the purge and the canary after any later failure;
 - it reads every moved version back in its new component, checks that the
   old component no longer lists it, checks every pool file's MD5, purges the
   CDN, and runs the apt canary on the newest version of each name and
