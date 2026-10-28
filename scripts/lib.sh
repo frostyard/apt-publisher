@@ -92,6 +92,24 @@ snapshot_component() {
 	fi
 }
 
+# registered_component NAME prints the component that NAME's producer is
+# registered for (column 6 of APT_PRODUCERS_FILE; a producer matches when one
+# of its column-2 globs does), and nothing when no producer matches. It dies
+# when producers registered for different components match NAME: no component
+# is then right, and a move or a rollback must not guess.
+registered_component() {
+	local repo patterns component found='' found_repo=''
+	while IFS=$'\t' read -r repo patterns _ _ _ component; do
+		matches_globs "$1" "$patterns" || continue
+		if [[ -n $found && $found != "$component" ]]; then
+			die "producers $found_repo ($found) and $repo ($component) register $1 for different components; fix config/producers.tsv"
+		fi
+		found=$component
+		found_repo=$repo
+	done < <(awk -F'\t' '!/^#/ && NF' "$APT_PRODUCERS_FILE")
+	[[ -z $found ]] || printf '%s\n' "$found"
+}
+
 # stanzas_tsv PACKAGES... prints one row per stanza:
 # Filename SHA256 Size Package Version Architecture MD5sum
 stanzas_tsv() {

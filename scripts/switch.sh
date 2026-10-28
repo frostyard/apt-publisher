@@ -13,6 +13,10 @@
 # a component); otherwise the codename needs a snapshot for every component,
 # and a codename that aptly does not publish yet needs all of them.
 #
+# A snapshot that puts a package name in a component other than its
+# producer's registered one (a snapshot taken before move.sh moved it) is
+# refused, also with --force: revert a move by a forward change.
+#
 # To pull a single version instead, use withdraw.sh.
 #
 # --force skips reconcile_state and lets aptly overwrite pool files whose
@@ -93,6 +97,21 @@ if ((${#given[@]} > 1)); then
 		LC_ALL=C sort | uniq -d)
 	[[ -z $overlap ]] || die "the snapshots publish ${overlap//$'\n'/ } in more than one component; pick snapshots that keep one name in one component"
 fi
+# A snapshot taken before a move puts a name in the component its producer
+# left (core ADR-0059). Publishing it would undo the move, and the next
+# publication would then fail on the one-component rule, so it is refused,
+# with or without --force. The move is reverted by a forward change. Names
+# without a registered producer are not judged.
+for component in "${given[@]}"; do
+	snapshot=${by_component[$component]}
+	snapshot_pkgs=$(snapshot_names "$snapshot")
+	while IFS= read -r name; do
+		[[ -n $name ]] || continue
+		registered=$(registered_component "$name")
+		[[ -z $registered || $registered == "$component" ]] ||
+			die "$snapshot puts $name in $component, but its producer is registered for $registered; a snapshot taken before a move is not a rollback target (core ADR-0059); revert a move by a forward change (registration plus move.sh)"
+	done <<<"$snapshot_pkgs"
+done
 if ((force)); then
 	log "warning: --force: not reconciling $codename with the bucket; overwriting differing pool files"
 	drop_pending "$codename"
