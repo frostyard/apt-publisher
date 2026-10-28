@@ -186,11 +186,13 @@ How it works:
   the ones without packages start empty.
 - A publication switches only its producer's component, in one `Release`.
 - A rollback takes one snapshot per component; a component the codename does
-  not publish yet is added empty.
+  not publish yet is added empty. It refuses a snapshot that puts a package
+  name in a component other than its producer's registered one (see
+  [Moving packages between components](#moving-packages-between-components)).
 
 `trixie` and `forky` publish `main,image`. Every producer is still `main`,
 and no producer moves in this change: ADR-0059 step 5 moves bootc-debian and
-incus to `image` later, with a move workflow.
+incus to `image` later, with the move workflow below.
 
 The live codenames published `main` only. The first publication run after
 this change adds each missing configured component to them, empty: it writes
@@ -199,6 +201,35 @@ That run can be a publication, a withdrawal, a rollback or an import, and a
 publication also adds the component to the codenames it does not target.
 Later runs switch as before. `publish switch` cannot add a component, and a
 configuration that removes a component from a published codename is refused.
+
+### Moving packages between components
+
+When a producer's registration changes component, the **move** workflow
+(`scripts/move.sh`) moves its published packages to the new component:
+
+- It moves every published version of every architecture whose component
+  differs from its producer's registration. Names without a registered
+  producer stay where they are. No package version changes.
+- Each codename gets one publication: the names leave one component and
+  appear in the other in one signed `Release`, as one recoverable
+  transaction like any publication.
+- It runs in the `apt-repository` concurrency group. **Run it with
+  `dry_run` first**: it prints the plan, one
+  `move CODENAME NAME VERSION ARCH FROM -> TO` line per package, and changes
+  nothing. The live run reads the result back (deep check), purges the CDN
+  cache and runs the canary on the newest moved version of each package.
+- It starts from what the bucket serves: a working repository that differs
+  from its published snapshot is refused. `--rebuild` rebuilds it from the
+  published snapshot after a run that died between saving and publishing.
+- **No pool file is deleted.** The files under `pool/main` stay; aptly
+  uploads copies under `pool/image`.
+- A publication between a registration change and the move fails on the
+  one-component rule; run it again after the move.
+- **Revert by a forward change.** Register the producer for its old
+  component and run the move again: it moves the names back. A snapshot
+  taken before a move is not a rollback target: `switch.sh` refuses it, also
+  with `--force`, because it would put a name back in the component its
+  producer left.
 
 Clients:
 
@@ -272,7 +303,9 @@ keyrings keep working.
     expected, and the audit never republishes.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
-  spaces. A codename that publishes only `main` takes one.
+  spaces. A codename that publishes only `main` takes one. Snapshots that
+  put a name in a component other than its producer's registered one, such
+  as snapshots from before a move, are refused.
   - It publishes those snapshots and rebuilds the working repositories from
     them, so later releases build on the rolled-back contents.
   - Everything published to that codename after the snapshots is
@@ -280,6 +313,9 @@ keyrings keep working.
     roll it forward.
   - With the snapshot left empty, it lists snapshots, publications and
     pending markers instead.
+- **Move packages between components:** run **move** (`dry_run` is the
+  default) after changing a producer's `component`; see
+  [Moving packages between components](#moving-packages-between-components).
 - **Recovery:** when a run refuses because the bucket doesn't match aptly's
   database, inspect what changed first.
   - Then run **rollback** with `force` and the snapshots the bucket should

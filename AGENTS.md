@@ -18,6 +18,10 @@ the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision.
 - `reconcile_state` must run before any change in every path that can
   publish, and publications go through `commit_publications` (pending marker,
   save, publish, clear, save). Only `switch.sh --force` skips reconciliation.
+- The move (`scripts/move.sh`) goes through `reconcile_state` and
+  `commit_publications` like every publishing path, and `switch.sh` refuses
+  snapshots that contradict a registration (core ADR-0059): a move is
+  reverted by a forward change, never by a rollback.
 - Rollback rebuilds the working repository from the snapshot (`rebuild_repo`);
   otherwise the next publication would restore what was rolled back.
 - A codename publishes the components in `config/codenames.tsv` (`main`, or
