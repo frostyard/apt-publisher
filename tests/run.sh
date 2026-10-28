@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-for tool in aptly rclone jq gpg gpgv gpgconf dpkg-deb apt-get apt-cache curl python3 sha256sum gzip; do
+for tool in aptly rclone jq gpg gpgv gpgconf dpkg-deb apt-get apt-cache curl python3 sha256sum gzip xz; do
 	command -v "$tool" >/dev/null || {
 		echo "not ok - $tool is required" >&2
 		exit 1
@@ -658,6 +658,94 @@ if env PATH="$tmp/shim-gh:$PATH" "$ROOT/scripts/audit-producers.sh" >"$tmp/out" 
 fi
 check "the audit reports an unpublished release" \
 	grep -qx 'MISSING frostyard/updex v3.2.0 frostyard-updex_3.2.0_amd64.deb' "$tmp/out"
+
+# --- Debian names in main (core ADR-0059) ---------------------------------------------
+
+# Fake Debian and security mirrors: file:// trees with unsigned Release files
+# whose SHA256 section matches the xz-compressed indexes.
+# mkindex MIRROR SUITE COMPONENT ARCH NAME... writes the index and its Release line.
+mkindex() {
+	local mirror=$1 suite=$2 component=$3 arch=$4 dir
+	shift 4
+	dir=$mirror/dists/$suite/$component/binary-$arch
+	mkdir -p "$dir"
+	# With no names the index is empty, as some forky indexes are.
+	if [[ $# == 0 ]]; then
+		xz -c </dev/null >"$dir/Packages.xz"
+	else
+		printf 'Package: %s\nVersion: 1\nArchitecture: all\n\n' "$@" | xz -c >"$dir/Packages.xz"
+	fi
+	printf ' %s %s %s/binary-%s/Packages.xz\n' "$(sha256sum <"$dir/Packages.xz" | cut -d' ' -f1)" \
+		"$(stat -c %s "$dir/Packages.xz")" "$component" "$arch" >>"$mirror/dists/$suite/Release.sha"
+}
+# mkrelease MIRROR SUITE writes Release from the lines mkindex collected.
+mkrelease() {
+	{
+		printf 'Suite: %s\nComponents: main contrib\nSHA256:\n' "$2"
+		printf ' %064d 0 main/Contents-amd64.gz\n' 0
+		cat "$1/dists/$2/Release.sha"
+	} >"$1/dists/$2/Release"
+	rm "$1/dists/$2/Release.sha"
+}
+debmirror=$tmp/debmirror debsec=$tmp/debsec
+rm -rf "$debmirror" "$debsec"
+# trixie ships trixie-thing, also updated; imgpkg is an image name here.
+for arch in amd64 arm64 all; do
+	mkindex "$debmirror" trixie main "$arch" libc6 imgpkg trixie-thing
+	mkindex "$debmirror" trixie-updates main "$arch" trixie-thing
+	mkindex "$debsec" trixie-security main "$arch" incus
+	mkindex "$debmirror" forky main "$arch"
+	mkindex "$debmirror" forky-updates main "$arch" libc6
+	mkindex "$debsec" forky-security main "$arch"
+done
+for suite in trixie trixie-updates forky forky-updates; do mkrelease "$debmirror" "$suite"; done
+for suite in trixie-security forky-security; do mkrelease "$debsec" "$suite"; done
+
+scope debnames
+export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/producers-image.tsv
+mkdeb "$tmp/dn-updex" frostyard-updex 1.0 amd64
+mkdeb "$tmp/dn-thing" trixie-thing 1.0 amd64
+mkdeb "$tmp/dn-incus" incus '1:7.5.1-debian13-202610031200' amd64
+mkdeb "$tmp/dn-img" imgpkg 1.0 amd64
+must_pass "publish updex for the Debian-name audit" run publish.sh --producer frostyard/updex --debs "$tmp/dn-updex"
+must_pass "publish trixie-thing for the Debian-name audit" run publish.sh --producer frostyard/trixie-only --debs "$tmp/dn-thing"
+must_pass "publish incus for the Debian-name audit" run publish.sh --producer frostyard/incus --debs "$tmp/dn-incus"
+must_pass "publish an image package with a Debian name" run publish.sh --producer frostyard/image-only --debs "$tmp/dn-img"
+# absent PATTERN FILE: the pattern is not in the file.
+absent() { ! grep -q "$@"; }
+debnames() { env APT_DEBIAN_MIRROR=file://"$debmirror" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"; }
+if debnames >"$tmp/out" 2>"$tmp/err"; then
+	not_ok "the Debian-name audit reports Debian names (unexpectedly passed)"
+fi
+ok "the Debian-name audit exits 1 on a finding"
+check "a name in the codename suite is reported with every suite that ships it" \
+	grep -qx 'DEBIAN-NAME trixie trixie-thing trixie,trixie-updates' "$tmp/out"
+check "a name in the security suite only is reported with -security" \
+	grep -qx 'DEBIAN-NAME trixie incus trixie-security' "$tmp/out"
+check "a Frostyard-only name is not reported" absent frostyard-updex "$tmp/out"
+check "a Debian name in image is not reported" absent imgpkg "$tmp/out"
+check "a missing suite is skipped" grep -q 'trixie-backports does not exist' "$tmp/err"
+check "the findings are the only output" test "$(wc -l <"$tmp/out")" = 2
+
+# A hash that does not match the Release is fatal, not "no names".
+cp -r "$debmirror" "$tmp/debmirror-bad"
+printf 'tampered' >>"$tmp/debmirror-bad/dists/trixie/main/binary-amd64/Packages.xz"
+must_fail "a Packages.xz that does not match its Release hash fails the audit" \
+	"does not match the SHA256 in its Release" \
+	env APT_DEBIAN_MIRROR=file://"$tmp/debmirror-bad" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"
+# A failed fetch other than a missing suite is fatal too.
+must_fail "an unreachable mirror fails the audit" "cannot fetch" \
+	env APT_DEBIAN_MIRROR=http://127.0.0.1:1 APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"
+
+# With no Debian name in main the audit passes.
+scope debnames-clean
+mkdeb "$tmp/dn-clean" frostyard-updex 1.0 amd64
+must_pass "publish only updex" run publish.sh --producer frostyard/updex --debs "$tmp/dn-clean"
+must_pass "with no Debian name in main the audit exits 0" debnames
+check "and prints no finding" test ! -s "$tmp/out"
+export APT_CODENAMES_FILE=$tmp/codenames-main.tsv APT_PRODUCERS_FILE=$tmp/producers.tsv
+# The next section continues in the audit scope.
+scope audit
 
 # --- a snapshot check reads the whole snapshot list -------------------------------------
 

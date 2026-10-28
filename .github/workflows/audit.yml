@@ -39,3 +39,20 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+      - name: Debian names in main
+        # Also when the producer audit failed: the two reports are independent.
+        if: ${{ !cancelled() }}
+        run: |
+          if ! scripts/audit-debian-names.sh | tee "$RUNNER_TEMP/debian-names.txt"; then
+            {
+              echo "### Debian names in main"
+              echo
+              echo "Each line is \`DEBIAN-NAME codename package suites\`: Debian ships a package of that name in those suites for that codename, and Frostyard's main component carries it."
+              echo "Such a package belongs in the image component. Moving its producer to image is a reviewed registration change (core ADR-0059); the audit never moves anything. If there are no lines, the audit itself failed: read its log."
+              echo
+              echo '```'
+              cat "$RUNNER_TEMP/debian-names.txt"
+              echo '```'
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
