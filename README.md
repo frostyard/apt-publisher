@@ -42,7 +42,14 @@ ones. Every writer workflow sets `queue: max` instead, so up to 100 runs wait
 their turn. A failed or cancelled run keeps its payload and can be re-run
 from the Actions page. The nightly **audit** workflow catches anything that
 still slips through, such as a producer whose dispatch step failed: it
-reports every latest-release `.deb` that no codename lists.
+reports every latest-release `.deb` that no codename lists. It also runs the
+Debian-name audit (`scripts/audit-debian-names.sh`, core ADR-0059): it prints
+`DEBIAN-NAME codename package suites` for each package in `main` whose name
+Debian ships in the codename's suite, `-updates`, `-security` or `-backports`.
+Such a package belongs in `image`. The audit is report-only; moving a producer
+is a reviewed registration change. It trusts HTTPS and the hashes in Debian's
+`Release` file, not Debian's signature, and a failed fetch or hash mismatch
+fails it rather than reading as "no names".
 
 Bucket layout (`frostyardrepo`):
 
@@ -305,7 +312,8 @@ legacy `/public.key` stays unchanged and is not touched.
   `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`; use
   `trixie/image` for the image component.
 - **Missed releases:** `scripts/audit-producers.sh`, run nightly by
-  **audit**.
+  **audit**. Debian names in `main`: `scripts/audit-debian-names.sh`, also
+  run by **audit**.
 - **Secrets:** run **check-secrets** after setting or rotating one.
 - **Routing check** without credentials:
   `scripts/publish.sh --producer frostyard/updex --debs ./dist --dry-run`.
