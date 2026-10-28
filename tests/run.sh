@@ -571,8 +571,8 @@ must_pass "the canary passes after the repair" run apt-canary.sh trixie amd64 tr
 # "SUBSTRING MODE N" rows: apt's first N GETs of a path with SUBSTRING get a 503
 # (MODE 503) or stall for 4 s (MODE stall), which is longer than the timeout.
 # apt reconnects once by itself after a timeout: a try needs two stalls to fail. The
-# curl warm-up is never counted. The first row is a sequence number: a new one
-# resets the counters.
+# curl warm-up is never counted; MODE warmstall stalls only the warm-up, for
+# 6 s. The first row is a sequence number: a new one resets the counters.
 cp -r "$pub" "$tmp/http-pub"
 cat >"$tmp/http-server.py" <<'EOF'
 import functools, http.server, sys, threading, time
@@ -592,9 +592,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 		if rows[:1] != seen:
 			seen = rows[:1]
 			hits.clear()
-		if self.headers.get("User-Agent", "").startswith("Debian APT"):
+		apt = self.headers.get("User-Agent", "").startswith("Debian APT")
+		if not apt and any(r.split()[1:2] == ["warmstall"] and r.split()[0] in self.path for r in rows[1:]):
+			time.sleep(6)
+			return
+		if apt:
 			for row in rows[1:]:
 				sub, mode, n = row.split()
+				if mode == "warmstall":
+					continue
 				if sub in self.path:
 					with lock:
 						hits[row] = hits.get(row, 0) + 1
@@ -680,6 +686,12 @@ must_fail "the canary stops retrying when the budget is spent" "the canary budge
 	canary_http APT_CANARY_BUDGET=6 APT_CANARY_DELAY=3
 must_fail "the budget stops a hanging apt-get" "the canary budget of 2s is spent; stopped" \
 	canary_http APT_CANARY_BUDGET=2 APT_CANARY_TIMEOUT=60
+# A stalled warm-up does not use the budget: apt still gets its time.
+serve_ctl 'trixie-thing_1.1 warmstall 99'
+must_pass "a stalled warm-up does not fail the canary" canary_http APT_CANARY_BUDGET=5
+check "the stalled warm-up is logged" grep -q 'canary warm-up curl failed' "$tmp/err"
+must_pass "the warm-up can be turned off" canary_http APT_CANARY_WARMUP=0
+check "a turned-off warm-up is logged" grep -q 'warm-up allowance is spent' "$tmp/err"
 serve_ctl
 
 # The error classes, with apt 2.7's wording (the CI runner's apt), through a

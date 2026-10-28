@@ -14,10 +14,15 @@
 #   APT_CANARY_TIMEOUT  apt http/https timeout, seconds, at least 1, connect and data (120)
 #   APT_CANARY_TRIES    tries per apt-get command, at least 1 (4)
 #   APT_CANARY_DELAY    seconds; the sleep before try n+1 is DELAY*n (30)
-#   APT_CANARY_BUDGET   seconds for the whole run, at least 1 (600). A hard
-#                       limit: apt-get and curl run under it, and the canary
+#   APT_CANARY_BUDGET   seconds for apt-get and the pauses, at least 1 (600).
+#                       A hard limit: apt-get runs under it, and the canary
 #                       fails rather than start a pause it cannot finish, so
 #                       it fails with its own log inside the job's time limit.
+#   APT_CANARY_WARMUP   seconds for all warm-ups together, 0 turns them off
+#                       (120); at most 60 for one. Warm-up time does not count
+#                       against the budget, so a slow warm-up cannot fail the
+#                       canary. The whole run takes at most BUDGET + WARMUP
+#                       (plus apt-get's 10 s kill grace).
 # Retried: apt-get update on any failure (a stale index right after the CDN
 # purge is the known cause), and apt-get download only on a transient network
 # error (see transient). Never retried: a 404, a hash or size mismatch, a bad
@@ -43,9 +48,12 @@ timeout=$(tunable APT_CANARY_TIMEOUT 120 1)
 tries=$(tunable APT_CANARY_TRIES 4 1)
 delay=$(tunable APT_CANARY_DELAY 30 0)
 budget=$(tunable APT_CANARY_BUDGET 600 1)
+warmup=$(tunable APT_CANARY_WARMUP 120 0)
+warm_spent=0
 
-# left prints the seconds left in the budget; SECONDS counts from the start.
-left() { echo $((budget - SECONDS)); }
+# left prints the seconds left in the budget. SECONDS counts from the start;
+# the warm-ups' time is not part of the budget.
+left() { echo $((budget - SECONDS + warm_spent)); }
 
 # bounded LOG CMD... runs CMD with its output in LOG and the rest of the
 # budget as a hard limit, and returns CMD's status. It dies when the budget
@@ -81,10 +89,10 @@ transient() {
 # warm_up DIR OPTS... SPEC logs how the CDN serves the package URL. It never fails.
 warm_up() {
 	local d=$1 spec=${!#} uri out code time size cache max
-	max=$(left)
-	((max <= 300)) || max=300
+	max=$((warmup - warm_spent))
+	((max <= 60)) || max=60
 	if ((max < 1)); then
-		log "canary warm-up $spec: skipped, the budget is spent"
+		log "canary warm-up $spec: skipped, the warm-up allowance is spent"
 		return 0
 	fi
 	uri=$(cd "$d/download" && apt-get "${@:2:$#-2}" -q --print-uris download "$spec" 2>/dev/null |
@@ -94,7 +102,7 @@ warm_up() {
 		return 0
 	fi
 	: >"$d/warm.hdr"
-	out=$(curl -sS -o /dev/null --max-time "$max" --speed-limit 1 --speed-time 120 -D "$d/warm.hdr" \
+	out=$(curl -sS -o /dev/null --max-time "$max" -D "$d/warm.hdr" \
 		-w '%{http_code} %{time_total} %{size_download}' "$uri" 2>"$d/warm.err") || log "canary warm-up curl failed: $(cat "$d/warm.err")"
 	read -r code time size <<<"$out" || true
 	cache=$(awk -F': *' 'tolower($1) == "cf-cache-status" { gsub(/\r/, "", $2); v = $2 } END { print v }' "$d/warm.hdr") || cache=''
@@ -124,7 +132,7 @@ canary() {
 		-o Debug::NoLocking=1 -o "APT::Architecture=$arch" -o "APT::Architectures::=$arch"
 		-o "APT::Sandbox::User=$(id -un)"
 		-o Acquire::Retries=0 -o "Acquire::http::Timeout=$timeout" -o "Acquire::https::Timeout=$timeout")
-	local try=1 first pause
+	local try=1 first pause t0
 	while :; do
 		if bounded "$d/update.log" apt-get "${opts[@]}" -q update && ! grep -q '^[WE]:' "$d/update.log"; then
 			break
@@ -138,7 +146,9 @@ canary() {
 		try=$((try + 1))
 	done
 	for spec in "$@"; do
+		t0=$SECONDS
 		warm_up "$d" "${opts[@]}" "$spec" || true
+		warm_spent=$((warm_spent + SECONDS - t0))
 		try=1
 		while :; do
 			if bounded "$d/download.log" env -C "$d/download" apt-get "${opts[@]}" -q download "$spec"; then
