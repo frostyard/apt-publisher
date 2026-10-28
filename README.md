@@ -195,7 +195,8 @@ How it works:
 `trixie` and `forky` publish `main,image`. frostyard/bootc-debian (`bootc`,
 `libostree-1-1`) and frostyard/incus (`incus`, `incus-base`, `incus-client`,
 `incus-extra`, `incus-ui-canonical`) are registered for `image` (ADR-0059
-step 5): their builds replace Debian packages of the same name. Every other
+step 5): their builds replace Debian packages of the same name, or depend on
+those replacements (`bootc`, `incus-ui-canonical`). Every other
 producer is `main`. The versions they published to `main` before the
 registration move with the move workflow below.
 
