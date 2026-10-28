@@ -56,7 +56,7 @@ if ((list)); then
 	aptly_ snapshot list -sort=time
 	for f in "$APTLY_ROOT"/txn/move-*; do
 		[[ -f $f ]] || continue
-		printf 'move pending: %s %s\n' "${f##*/move-}" "$(awk '{ printf "%s%s=%s", sep, $1, $2; sep = " " }' "$f")"
+		printf 'move pending: %s %s\n' "${f##*/move-}" "$(awk '$1 != "row" && NF >= 2 { printf "%s%s=%s", sep, $1, $2; sep = " " }' "$f")"
 	done
 	for f in "$APTLY_ROOT"/txn/pending-*; do
 		[[ -f $f ]] || continue

@@ -17,33 +17,33 @@
 # pool/main stay, and aptly uploads copies under pool/image.
 #
 # Every working repository must hold exactly the package set of its published
-# snapshot, because the move starts from what the bucket serves. A run that
-# died after saving its repository changes but before publishing leaves a
-# repository that differs; --rebuild rebuilds it from the published snapshot
-# (rebuild_repo) and carries on, after you have inspected the refusal.
+# snapshot, because the move starts from what the bucket serves. A move that
+# died is settled by the move marker (below), not by this check. A repository
+# that differs without such a marker is drift; --rebuild rebuilds it from the
+# published snapshot (rebuild_repo) and carries on, after you have inspected
+# the refusal.
 #
 # With --dry-run nothing is reconciled, changed or saved: it prints the plan
 # and stops. A live run validates every codename before it changes any.
 #
 # A move changes two components, and its publication is saved before it
-# becomes visible. A move marker (txn/move-CODENAME, written before the
-# publication, removed after it) lets the next run of any script settle it
-# (reconcile_state): complete a move that became visible, and undo one that
-# did not, by rebuilding the changed working repositories from the published
-# snapshots. Then the move can simply run again.
+# becomes visible. A move marker (txn/move-CODENAME) therefore holds the
+# snapshot names and the plan, and is saved FIRST, before any repository is
+# moved. The next run of any script settles it (reconcile_state): it
+# completes a move that became visible, and undoes one that did not, by
+# rebuilding the changed working repositories from the published snapshots.
+# The marker is removed only after the read-back passes. A later move.sh run
+# that finds a move completed by reconciliation verifies it and prints it, so
+# the workflow's purge and canary still run. --recheck does the read-back for
+# a codename without any change.
 #
-# Prints "CODENAME SNAPSHOT SNAPSHOT" on stdout for each published codename.
-# With --report FILE, writes "codename name version arch component" rows for
-# apt-canary.sh: only the newest version of each (codename, name, arch), so
-# the canary does not download every moved file through the CDN; the deep
-# read-back already checks every file's MD5.
-
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
 usage() {
 	cat >&2 <<'EOF'
 usage: move.sh [--codename CODENAME]... [--dry-run] [--rebuild] [--report FILE]
+       move.sh --recheck [--codename CODENAME]... [--report FILE]
 
   --codename  move only this codename (repeatable); default: every codename
   --dry-run   print the plan ("move CODENAME NAME VERSION ARCH FROM -> TO")
@@ -51,22 +51,29 @@ usage: move.sh [--codename CODENAME]... [--dry-run] [--rebuild] [--report FILE]
   --rebuild   rebuild a working repository that differs from its published
               snapshot, instead of refusing
   --report    write the newest moved version of each package as TSV to FILE
+  --recheck   change nothing: read the published suite back (deep check),
+              print each codename with its published snapshots, and report
+              the newest version of each package in every component but
+              main. Run it when a step after a move failed, or when a retry
+              found nothing to move; it refuses --dry-run and --rebuild
 EOF
 	exit 2
 }
 
-codenames=() dry_run=0 rebuild=0 report=''
+codenames=() dry_run=0 rebuild=0 recheck=0 report=''
 while (($#)); do
 	case $1 in
 	--codename) codenames+=("${2:?}") && shift ;;
 	--dry-run) dry_run=1 ;;
 	--rebuild) rebuild=1 ;;
+	--recheck) recheck=1 ;;
 	--report) report=${2:?} && shift ;;
 	*) usage ;;
 	esac
 	shift
 done
 require dpkg
+((!recheck || (!dry_run && !rebuild))) || die "--recheck changes nothing and cannot be combined with --dry-run or --rebuild"
 if ((${#codenames[@]} == 0)); then
 	mapfile -t codenames < <(awk -F'\t' '!/^#/ && NF { print $1 }' "$APT_CODENAMES_FILE")
 fi
@@ -85,17 +92,111 @@ repo_set() {
 	LC_ALL=C sort -u <<<"$out"
 }
 
+# The move marker (move_file in lib.sh) holds "COMPONENT SNAPSHOT" lines for
+# the changed components and "row NAME VERSION ARCH FROM TO" lines for the
+# plan. marker_snapshots and marker_rows print the two kinds.
+marker_snapshots() { awk '$1 != "row" && NF >= 2 { print $1, $2 }' <<<"$1"; }
+marker_rows() { awk -v OFS='\t' '$1 == "row" && NF == 6 { print $2, $3, $4, $5, $6 }' <<<"$1"; }
+
+report_rows=()
+
+# marker_visible CODENAME MARKER: does aptly publish every snapshot the
+# marker names?
+marker_visible() {
+	local component snapshot n=0
+	while read -r component snapshot; do
+		n=$((n + 1))
+		[[ $(published_snapshot "$1" "$component") == "$snapshot" ]] || return 1
+	done < <(marker_snapshots "$2")
+	((n))
+}
+
+# add_report_rows CODENAME ROWS adds the report rows of the newest moved
+# version of each (name, arch). ROWS holds one tab-separated moved package
+# per line: name, version, arch, from, to. The canary installs these only;
+# versions compare as dpkg does (epochs, ~).
+add_report_rows() {
+	local name version arch from to key
+	local -A newest=()
+	while IFS=$'\t' read -r name version arch from to; do
+		[[ -n $name ]] || continue
+		key=$name$'\t'$arch
+		if [[ -z ${newest[$key]:-} ]] || dpkg --compare-versions "$version" gt "${newest[$key]%%$'\t'*}"; then
+			newest[$key]=$version$'\t'$to
+		fi
+	done <<<"$2"
+	for key in "${!newest[@]}"; do
+		report_rows+=("$1"$'\t'"${key%%$'\t'*}"$'\t'"${newest[$key]%%$'\t'*}"$'\t'"${key#*$'\t'}"$'\t'"${newest[$key]#*$'\t'}")
+	done
+}
+
+# write_report writes the report rows, sorted; empty when there are none.
+write_report() {
+	[[ -n $report ]] || return 0
+	: >"$report"
+	if ((${#report_rows[@]})); then
+		printf '%s\n' "${report_rows[@]}" | LC_ALL=C sort -u >"$report"
+	fi
+}
+
 aptly_init
+
+# --- recheck: read back what is published, change nothing -------------------------
+#
+# For a failure after the move was saved (the read-back, the purge, the
+# canary): a retry finds nothing to move, so it would print no codename and
+# write no report. No reconcile, no change, no save.
+if ((recheck)); then
+	for codename in "${codenames[@]}"; do
+		if [[ -z $(published_components "$codename") ]]; then
+			log "$codename is not published; nothing to recheck"
+			continue
+		fi
+		verify_published "$codename" --deep
+		snapshots=()
+		rows=''
+		for component in $(codename_components "$codename" | tr , ' '); do
+			published=$(published_snapshot "$codename" "$component")
+			[[ -n $published ]] || die "aptly does not publish $codename component $component"
+			snapshots+=("$published")
+			[[ $component != main ]] || continue
+			# The bucket's own index: it is what the canary installs from.
+			have=$(bucket_set "$codename" "$component")
+			while read -r name version arch; do
+				[[ -n $name ]] || continue
+				rows+="$name"$'\t'"$version"$'\t'"$arch"$'\t'"-"$'\t'"$component"$'\n'
+			done <<<"$have"
+		done
+		printf '%s %s\n' "$codename" "${snapshots[*]}"
+		add_report_rows "$codename" "$rows"
+	done
+	write_report
+	exit 0
+fi
+
+[[ -r $APT_PRODUCERS_FILE ]] || die "cannot read the producers file $APT_PRODUCERS_FILE"
 
 # --- plan: validate every codename before any change --------------------------
 #
 # plan[CODENAME] holds one tab-separated row per moved package:
 # name, version, arch, from, to.
-declare -A plan=()
+declare -A plan=() recovered=()
 rebuilt=0
 for codename in "${codenames[@]}"; do
 	if ((!dry_run)); then
+		# Read the move marker first: reconcile_state settles and drops it.
+		marker_before=''
+		if [[ -f $(move_file "$codename") ]]; then
+			marker_before=$(<"$(move_file "$codename")")
+		fi
 		reconcile_state "$codename"
+		# A marker that reconciliation dropped while its snapshots are
+		# published: an earlier move became visible and died before its
+		# read-back. It is verified below; a move that was undone plans again.
+		if [[ -n $marker_before && ! -f $(move_file "$codename") ]] && marker_visible "$codename" "$marker_before"; then
+			recovered[$codename]=$marker_before
+			log "an earlier move of $codename became visible and died before its read-back; it is verified below"
+		fi
 	fi
 	configured=$(codename_components "$codename")
 	declare -A where=() decided=()
@@ -165,11 +266,30 @@ fi
 
 # --- apply -----------------------------------------------------------------------
 
-report_rows=()
 for codename in "${codenames[@]}"; do
+	if [[ -n ${recovered[$codename]:-} ]]; then
+		# The reconciliation completed the earlier move, so nothing is left
+		# to plan; it still needs the read-back, and the workflow's purge
+		# and canary need its codename and report rows.
+		recovered_rows=$(marker_rows "${recovered[$codename]}")
+		recovered_expect=()
+		while IFS=$'\t' read -r name version arch from to; do
+			[[ -n $name ]] || continue
+			recovered_expect+=("$to/$name=$version" "!$from/$name=$version")
+		done <<<"$recovered_rows"
+		# Reconciliation dropped the marker. Put it back until the read-back
+		# passes, so that a failure here can be retried the same way.
+		printf '%s\n' "${recovered[$codename]}" >"$(move_file "$codename")"
+		state_save
+		verify_published "$codename" --deep "${recovered_expect[@]}"
+		drop_move "$codename"
+		state_save
+		printf '%s %s\n' "$codename" "$(marker_snapshots "${recovered[$codename]}" | awk '{ printf "%s%s", sep, $2; sep = " " }')"
+		add_report_rows "$codename" "$recovered_rows"
+	fi
 	[[ -n ${plan[$codename]} ]] || continue
 	configured=$(codename_components "$codename")
-	declare -A pair_names=() changed=()
+	declare -A pair_names=() changed=() new_snapshot=()
 	expect=()
 	while IFS=$'\t' read -r name version arch from to; do
 		[[ " ${pair_names[$from:$to]:-} " == *" $name "* ]] || pair_names[$from:$to]+="$name "
@@ -177,8 +297,30 @@ for codename in "${codenames[@]}"; do
 		changed[$to]=1
 		expect+=("$to/$name=$version" "!$from/$name=$version")
 	done <<<"${plan[$codename]}"
+
+	# The move marker is durable before any moved repository is saved:
+	# state_save writes the database before the markers, so a marker written
+	# with the repositories could be missing when a run dies between the two,
+	# and a later publication of one component would strand the move in the
+	# other. Fix the snapshot names and the plan now, and save, while the
+	# database holds no moved repository. settle_move undoes a move whose
+	# snapshots are not published, also when they do not exist.
+	changed_components=()
+	marker=''
 	for component in ${configured//,/ }; do
-		[[ -z ${changed[$component]:-} ]] || ensure_repo "$codename" "$component" >/dev/null
+		[[ -n ${changed[$component]:-} ]] || continue
+		changed_components+=("$component")
+		new_snapshot[$component]=$(new_snapshot_name "$codename" "$component" move)
+		marker+="$component ${new_snapshot[$component]}"$'\n'
+	done
+	while IFS=$'\t' read -r name version arch from to; do
+		marker+="row $name $version $arch $from $to"$'\n'
+	done <<<"${plan[$codename]}"
+	printf '%s' "$marker" >"$(move_file "$codename")"
+	state_save
+
+	for component in "${changed_components[@]}"; do
+		ensure_repo "$codename" "$component" >/dev/null
 	done
 	# One query per name selects every version and architecture.
 	for pair in "${!pair_names[@]}"; do
@@ -200,21 +342,15 @@ for codename in "${codenames[@]}"; do
 	done <<<"${plan[$codename]}"
 	unset dst_sets
 
-	# New snapshots of both changed components, and an empty one for any
-	# other configured component the codename does not publish yet; then one
-	# publication, one signed Release.
+	# Snapshots of both changed components, with the names the marker holds,
+	# and an empty one for any other configured component the codename does
+	# not publish yet; then one publication, one signed Release.
 	commits=()
 	snapshots=()
-	changed_components=()
-	marker=''
-	for component in ${configured//,/ }; do
-		[[ -n ${changed[$component]:-} ]] || continue
-		changed_components+=("$component")
-		snapshot=$(new_snapshot_name "$codename" "$component" move)
-		aptly_ snapshot create "$snapshot" from repo "$(repo_name "$codename" "$component")" >/dev/null
-		commits+=("$codename/$component=$snapshot")
-		snapshots+=("$snapshot")
-		marker+="$component $snapshot"$'\n'
+	for component in "${changed_components[@]}"; do
+		aptly_ snapshot create "${new_snapshot[$component]}" from repo "$(repo_name "$codename" "$component")" >/dev/null
+		commits+=("$codename/$component=${new_snapshot[$component]}")
+		snapshots+=("${new_snapshot[$component]}")
 	done
 	others=$(missing_component_snapshots "$codename" move "${changed_components[@]}")
 	if [[ -n $others ]]; then
@@ -224,35 +360,15 @@ for codename in "${codenames[@]}"; do
 			snapshots+=("${spec#*=}")
 		done
 	fi
-	# The move changes two components, and commit_publications saves the
-	# repositories before it publishes. The marker, saved with them, lets the
-	# next run undo a move that never became visible (settle_move): else a
-	# publication of one component would strand the move in the other.
-	printf '%s' "$marker" >"$(move_file "$codename")"
 	commit_publications "${commits[@]}"
+	# The marker stays until the read-back passes: a failure here is retried
+	# by the recovered-move path above, with the read-back, purge and canary.
+	verify_published "$codename" --deep "${expect[@]}"
 	drop_move "$codename"
 	state_save
-	verify_published "$codename" --deep "${expect[@]}"
 	printf '%s %s\n' "$codename" "${snapshots[*]}"
-
-	# The canary installs the newest moved version of each package only;
-	# versions compare as dpkg does (epochs, ~).
-	declare -A newest=()
-	while IFS=$'\t' read -r name version arch from to; do
-		key=$name$'\t'$arch
-		if [[ -z ${newest[$key]:-} ]] || dpkg --compare-versions "$version" gt "${newest[$key]%%$'\t'*}"; then
-			newest[$key]=$version$'\t'$to
-		fi
-	done <<<"${plan[$codename]}"
-	for key in "${!newest[@]}"; do
-		report_rows+=("$codename"$'\t'"${key%%$'\t'*}"$'\t'"${newest[$key]%%$'\t'*}"$'\t'"${key#*$'\t'}"$'\t'"${newest[$key]#*$'\t'}")
-	done
-	unset pair_names changed newest
+	add_report_rows "$codename" "${plan[$codename]}"
+	unset pair_names changed new_snapshot
 done
 
-if [[ -n $report ]]; then
-	: >"$report"
-	if ((${#report_rows[@]})); then
-		printf '%s\n' "${report_rows[@]}" | LC_ALL=C sort -u >"$report"
-	fi
-fi
+write_report

@@ -1281,6 +1281,34 @@ mv_drift() {
 txn_markers() { rclone lsf "r2:frostyard-apt-state/$APT_STATE_PATH/txn" 2>/dev/null || true; }
 no_move_marker() { [[ $(txn_markers) != *move-* ]]; }
 has_move_marker() { [[ $(txn_markers) == *move-trixie* ]]; }
+# A shim that fails the Nth sync of a state path's txn/ (SHIM_TXN_FAIL_AT):
+# the markers are saved after the database, so this dies between the two.
+mkdir -p "$tmp/shim-rclone-txn"
+cat >"$tmp/shim-rclone-txn/rclone" <<EOF
+#!/usr/bin/env bash
+if [[ \$1 == sync && \${*: -1} == r2:frostyard-apt-state/\$SHIM_STATE_PATH/txn ]]; then
+	count=\$(( \$(cat "$tmp/shim-rclone-txn/count" 2>/dev/null || echo 0) + 1 ))
+	echo "\$count" >"$tmp/shim-rclone-txn/count"
+	if [[ \$count == "\$SHIM_TXN_FAIL_AT" ]]; then
+		echo "shim: simulated failure saving the transaction markers" >&2
+		exit 1
+	fi
+fi
+exec "$real_rclone" "\$@"
+EOF
+# An aptly that corrupts the bucket's pool object SHIM_CORRUPT once a publish
+# switch has succeeded: a move whose read-back must fail.
+mkdir -p "$tmp/shim-corrupt"
+cat >"$tmp/shim-corrupt/aptly" <<EOF
+#!/usr/bin/env bash
+"$real_aptly" "\$@"
+rc=\$?
+if [[ " \$* " == *" publish switch "* && \$rc == 0 ]]; then
+	printf 'corrupted bytes\n' | "$real_rclone" rcat "r2:frostyardrepo/\$APT_PREFIX/\$SHIM_CORRUPT"
+fi
+exit \$rc
+EOF
+chmod +x "$tmp/shim-rclone-txn/rclone" "$tmp/shim-corrupt/aptly"
 
 scope move
 export SHIM_STATE_PATH=move
@@ -1353,6 +1381,38 @@ must_pass "the move's suite passes the deep check" \
 	run verify.sh trixie --deep image/bootc=1:0.5-1~deb13 '!main/bootc=1:0.5-1~deb13' image/libostree-1-1=2026.3-1~deb13 main/frostyard-updex=1.0
 must_pass "the canary installs the reported packages from image" run apt-canary.sh --report "$tmp/mv-report.tsv"
 
+# --recheck reads the published suite back and changes nothing.
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_pass "a recheck succeeds" run move.sh --recheck --codename trixie --report "$tmp/mv-recheck.tsv"
+check "a recheck prints the codename and its published snapshots" \
+	test "$(cat "$tmp/out")" = "trixie $mv_main $mv_image"
+check "a recheck reads the suite back deeply" grep -q '^verified trixie' "$tmp/err"
+check "a recheck reports the newest version of each image package, as the move did" \
+	test "$(cat "$tmp/mv-recheck.tsv")" = "$(cat "$tmp/mv-report.tsv")"
+check "a recheck left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "a recheck left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+must_pass "a recheck of an unpublished codename has nothing to check" run move.sh --recheck --codename forky
+check "it prints nothing for it" test ! -s "$tmp/out"
+must_fail "--recheck with --dry-run is refused" "cannot be combined with --dry-run or --rebuild" run move.sh --recheck --dry-run
+must_fail "--recheck with --rebuild is refused" "cannot be combined with --dry-run or --rebuild" run move.sh --recheck --rebuild
+
+# A missing producers file is an error, not "no producer registered": the
+# rollback guard and the move must fail closed.
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "a rollback with a missing producers file fails" "cannot read the producers file" \
+	env APT_PRODUCERS_FILE="$tmp/no-such-producers.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/switch.sh" --codename trixie --snapshot "$mv_main" --snapshot "$mv_image"
+must_fail "a forced rollback with a missing producers file fails" "cannot read the producers file" \
+	env APT_PRODUCERS_FILE="$tmp/no-such-producers.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/switch.sh" --codename trixie --snapshot "$mv_main" --snapshot "$mv_image" --force
+must_fail "a move with a missing producers file fails" "cannot read the producers file" \
+	env APT_PRODUCERS_FILE="$tmp/no-such-producers.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/move.sh"
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusals left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+
 # A second run is a no-op.
 before=$(inrelease trixie)
 state_before=$(state_sum)
@@ -1398,14 +1458,20 @@ mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64 arm64
 export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
 rm -f -- "$tmp/shim-rclone/count"
 must_fail "a move interrupted after it became visible fails" "simulated failure" \
-	env SHIM_FAIL_AT=2 PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+	env SHIM_FAIL_AT=3 PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
 check "the interrupted move is visible in image" listed_in trixie image bootc '1.2-1~deb13' arm64
 check "and gone from main" not_listed_in trixie main bootc '1.2-1~deb13' arm64
 check "its state holds the move marker" has_move_marker
-must_pass "the next run completes it" run move.sh
+must_pass "the next run completes it" run move.sh --report "$tmp/mv-recovered.tsv"
 check "the next run reported the completion" grep -q 'completing the interrupted publication of trixie' "$tmp/err"
 check "the next run dropped the move marker" grep -q 'the interrupted move of trixie .* is visible; dropping its marker' "$tmp/err"
 check "no move marker remains" no_move_marker
+check "the retry verified the recovered move" grep -q 'an earlier move of trixie became visible and died before its read-back' "$tmp/err"
+check "the retry ran the deep read-back" grep -q '^verified trixie: image/bootc=1.2-1~deb13' "$tmp/err"
+check "the retry printed the codename and its snapshots" \
+	matches "^trixie trixie-$snapshot_re-move trixie-image-$snapshot_re-move\$" "$(cat "$tmp/out")"
+check "the retry wrote the report rows of the recovered move" \
+	test "$(cat "$tmp/mv-recovered.tsv")" = "$(printf 'trixie\tbootc\t1.2-1~deb13\tamd64\timage\ntrixie\tbootc\t1.2-1~deb13\tarm64\timage\n')"
 check "the next run did not undo the move" test -z "$(grep -E 'never became visible|rebuilt frostyard' "$tmp/err" || true)"
 check "and has nothing left to move" grep -qxF 'nothing to move in trixie' "$tmp/err"
 must_pass "the completed suite verifies" run verify.sh trixie --deep image/bootc=1.2-1~deb13 '!main/bootc=1.2-1~deb13'
@@ -1473,6 +1539,78 @@ done
 check "main keeps frostyard-updex 1.1" listed_in trixie main frostyard-updex 1.1
 must_pass "the repeated move verifies" run verify.sh trixie --deep image/bootc=1.10-1~deb13 '!main/bootc=1.10-1~deb13'
 check "no move marker remains after the repeated move" no_move_marker
+
+# The marker is saved before any moved repository: a move that dies between
+# the database sync and the marker sync of its first publication save (the
+# database holds the moved repositories, the pending markers are lost) is
+# still undone by the next publication.
+scope movemark
+export SHIM_STATE_PATH=movemark
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64 arm64
+mv_publish frostyard/bootc-debian bootc '1.10-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+rm -f -- "$tmp/shim-rclone-txn/count"
+# Saves of the move: 1 the marker, 2 the publication's (the one to fail), 3 and 4 after it.
+must_fail "a move that dies between the database sync and the marker sync" "simulated failure saving the transaction markers" \
+	env SHIM_TXN_FAIL_AT=2 PATH="$tmp/shim-rclone-txn:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the saved state holds the move marker, written before the repositories" has_move_marker
+mkdeb "$tmp/mv-mark-updex" frostyard-updex 1.1 amd64
+must_pass "an unrelated main publication runs" \
+	run publish.sh --producer frostyard/updex --debs "$tmp/mv-mark-updex" --codenames trixie
+check "it undid the move" grep -q 'an interrupted move of trixie never became visible and was undone' "$tmp/err"
+for pair in 'bootc 1.2-1~deb13 amd64' 'bootc 1.2-1~deb13 arm64' 'bootc 1.10-1~deb13 amd64'; do
+	read -r name version arch <<<"$pair"
+	check "$name $version $arch is listed in main" listed_in trixie main "$name" "$version" "$arch"
+	check "$name $version $arch is not listed in image" not_listed_in trixie image "$name" "$version" "$arch"
+	check "the main working repository holds $name $version $arch" \
+		grep -qxF "$name $version $arch" <<<"$(working_repo trixie main)"
+done
+check "the image working repository is empty" test -z "$(working_repo trixie image)"
+check "no move marker remains" no_move_marker
+must_pass "the move runs again and succeeds" run move.sh
+check "image lists the moved versions" listed_in trixie image bootc '1.10-1~deb13' amd64
+check "main does not" not_listed_in trixie main bootc '1.10-1~deb13' amd64
+
+# A failure after the move was saved is repeatable. Here the last save of the
+# move fails (after its read-back passed): the retry verifies it again.
+scope moverec
+export SHIM_STATE_PATH=moverec
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+rm -f -- "$tmp/shim-rclone/count"
+must_fail "a move whose last save fails" "simulated failure" \
+	env SHIM_FAIL_AT=4 PATH="$tmp/shim-rclone:$PATH" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the move marker is still saved" has_move_marker
+must_pass "the retry is not a silent no-op" run move.sh --report "$tmp/mv-rec.tsv"
+check "it verified the recovered move" grep -q '^verified trixie: image/bootc=1.2-1~deb13' "$tmp/err"
+check "it printed the codename" matches '^trixie ' "$(cat "$tmp/out")"
+check "it wrote the report" grep -qxP 'trixie\tbootc\t1.2-1~deb13\tamd64\timage' "$tmp/mv-rec.tsv"
+check "no move marker remains after the retry" no_move_marker
+
+# A move whose deep read-back fails keeps its marker, and a retry verifies again.
+scope moveverify
+export SHIM_STATE_PATH=moveverify
+mv_publish frostyard/bootc-debian bootc '1.2-1~deb13' amd64
+mv_publish frostyard/updex frostyard-updex 1.0 amd64
+export APT_PRODUCERS_FILE=$tmp/producers-move-image.tsv
+must_fail "a move whose read-back finds a corrupted image pool file fails" "does not match its SHA256" \
+	env SHIM_CORRUPT=pool/image/b/bootc/bootc_1.2-1~deb13_amd64.deb PATH="$tmp/shim-corrupt:$PATH" \
+	APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
+check "the move is visible" listed_in trixie image bootc '1.2-1~deb13' amd64
+check "the failed read-back keeps the move marker" has_move_marker
+must_fail "a recheck finds the corruption too" "MD5 mismatch in the bucket" run move.sh --recheck --codename trixie
+must_fail "the retry verifies again and fails again" "does not match its SHA256" run move.sh --report "$tmp/mv-verify.tsv"
+check "the retry keeps the move marker" has_move_marker
+check "the retry says it verifies a recovered move" grep -q 'became visible and died before its read-back' "$tmp/err"
+rclone copyto "r2:frostyardrepo/$APT_PREFIX/pool/main/b/bootc/bootc_1.2-1~deb13_amd64.deb" \
+	"r2:frostyardrepo/$APT_PREFIX/pool/image/b/bootc/bootc_1.2-1~deb13_amd64.deb"
+must_pass "after the repair the retry passes" run move.sh --report "$tmp/mv-verify.tsv"
+check "it printed the codename" matches '^trixie ' "$(cat "$tmp/out")"
+check "it wrote the report" grep -qxP 'trixie\tbootc\t1.2-1~deb13\tamd64\timage' "$tmp/mv-verify.tsv"
+check "no move marker remains after the passing retry" no_move_marker
+must_pass "a recheck passes" run move.sh --recheck --codename trixie
 
 # switch.sh --force drops a move marker, and says so.
 scope moveforce
