@@ -490,6 +490,8 @@ reconcile_state() {
 			fi
 		done
 		log "completing the interrupted publication of $codename from ${names[*]}"
+		# The recovery publishes too, so it is gated like commit_publications.
+		publish_key
 		publish_snapshot "$codename" "${specs[@]}"
 		drop_pending "$codename"
 		state_save
@@ -734,7 +736,9 @@ publish_key() {
 		log "published key is current"
 		return 0
 	fi
-	rclone copyto "$APT_KEYRING" "$(key_object)" || die "cannot upload the key to $(key_object)"
+	# --ignore-times: rclone skips a copy whose size and modification time
+	# match, but the bytes were just found to differ.
+	rclone copyto --ignore-times "$APT_KEYRING" "$(key_object)" || die "cannot upload the key to $(key_object)"
 	bucket_key_matches || die "the key in the bucket differs from $APT_KEYRING after the upload"
 	log "uploaded the published key"
 }
