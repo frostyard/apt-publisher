@@ -798,6 +798,10 @@ cp -r "$pub" "$tmp/pub-html"
 printf '<html><body>Error</body></html>\n' >"$tmp/pub-html/dists/trixie/main/binary-amd64/Packages"
 must_fail "an HTML page as Frostyard's index fails the audit" "is not a Packages index" \
 	env APT_PUBLIC_URL=file://"$tmp/pub-html" "$ROOT/scripts/audit-debian-names.sh"
+printf 'Filename: pool/main/x/x_1_amd64.deb\nSHA256: %064d\nVersion: 1\n\n' 0 \
+	>"$tmp/pub-html/dists/trixie/main/binary-amd64/Packages"
+must_fail "a Frostyard stanza without a Package field fails the audit" "without a Package field" \
+	env APT_PUBLIC_URL=file://"$tmp/pub-html" "$ROOT/scripts/audit-debian-names.sh"
 must_fail "a missing codenames file fails the audit" "cannot read" \
 	env APT_CODENAMES_FILE="$tmp/no-such-codenames.tsv" "$ROOT/scripts/audit-debian-names.sh"
 printf '# only a comment\n' >"$tmp/codenames-empty.tsv"

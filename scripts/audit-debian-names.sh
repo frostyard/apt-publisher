@@ -106,9 +106,12 @@ while IFS=$'\t' read -r codename _ archs _; do
 		if [[ $rc == 0 ]]; then
 			published=1
 			# stanzas_tsv dies on a stanza without Filename and SHA256, so an
-			# error page is not read as names. Column 4 is the package name.
+			# error page is not read as names. Column 4 is the package name,
+			# which every stanza must have too.
 			stanzas_tsv "$tmp/Packages" >"$tmp/stanzas" ||
 				die "$APT_PUBLIC_URL/dists/$codename/main/binary-$arch/Packages is not a Packages index"
+			awk -F'\t' '$4 == "" { bad = 1 } END { exit bad }' "$tmp/stanzas" ||
+				die "$APT_PUBLIC_URL/dists/$codename/main/binary-$arch/Packages has a stanza without a Package field"
 			cut -f4 "$tmp/stanzas" >>"$tmp/frostyard"
 		else
 			log "warning: $codename/main/$arch is not published"
