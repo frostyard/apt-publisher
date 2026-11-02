@@ -1772,6 +1772,13 @@ fake_suite "$tmp/two-component-pub" trixie 'imgpkg 1.0 amd64'
 must_fail "a dry run refuses a name that two components hold" "imgpkg in more than one component" \
 	env APT_PUBLIC_URL="file://$tmp/two-component-pub" "$ROOT/scripts/withdraw.sh" \
 	--codename trixie --package imgpkg --version 1.0 --dry-run
+fake_before=$(sha256sum <"$tmp/two-component-pub/dists/trixie/InRelease")
+must_fail "a dry run refuses a published component that the configuration dropped" \
+	"trixie publishes component image, but the configuration says main" \
+	env APT_PUBLIC_URL="file://$tmp/two-component-pub" APT_CODENAMES_FILE="$tmp/codenames-main.tsv" \
+	"$ROOT/scripts/withdraw.sh" --codename trixie --package imgpkg --version 1.0 --dry-run
+check "that refusal left the suite unchanged" \
+	test "$(sha256sum <"$tmp/two-component-pub/dists/trixie/InRelease")" = "$fake_before"
 
 # The live mode reads the working repositories, where the state is built
 # with aptly directly, as a state repaired by hand would be.
