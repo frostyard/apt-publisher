@@ -45,7 +45,7 @@ elif ! cmp -s -- "$tmp/key.gpg" "$APT_KEYRING"; then
 fi
 
 declare -A fetched=()
-while IFS=$'\t' read -r producer _ codenames _ _ component; do
+while IFS=$'\t' read -r producer _ codenames _ _ component _; do
 	IFS=, read -ra targets <<<"$codenames"
 	# Each codename's index is read once per component.
 	for codename in "${targets[@]}"; do

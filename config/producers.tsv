@@ -1,4 +1,4 @@
-# repository	packages	codenames	attested	notify	component
+# repository	packages	codenames	attested	notify	component	keep
 #
 # repository  GitHub owner/name allowed to request publication.
 # packages    comma-separated shell globs; every .deb in a release must match.
@@ -14,9 +14,16 @@
 #             the same name, or depend on such a build. Changing a producer's
 #             component needs the move workflow (move.yml) right after the
 #             merge: until it runs, the producer's publications fail closed.
+# keep        retention: a positive integer N keeps only the newest N versions
+#             of each of the producer's packages, and the publication that
+#             adds newer ones withdraws the rest from the index in the same
+#             run (core ADR-0067). - means no limit. A publication that would
+#             withdraw one of its own packages at once is refused. Pool files
+#             stay, so a pruned version comes back only through a rollback.
+#             An empty column means -.
 #
 # Add a producer only after confirming the package names it ships.
-frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
+frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main	-
 # incus versions carry -debian13-, which is not a ~debNN marker, so they
 # would route to every target: trixie only until they carry ~deb13/~deb14.
 # Not attested: it releases from pushes to stable, so its provenance names
@@ -24,18 +31,18 @@ frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
 # image (core ADR-0059 step 5): Debian 13 ships incus, incus-base,
 # incus-client and incus-extra (trixie-security), and the 1: epoch makes these
 # builds replace them; incus-ui-canonical goes with them, one producer.
-frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	image
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	image	-
 # Static Go, attested from v* tags; registering attested=yes also refuses the
 # unattested nightly `dev` prerelease, whose 1.0.0.dev version sorts above releases.
-frostyard/intuneme	frostyard-intuneme	trixie,forky	yes	frostyard/snosi	main
+frostyard/intuneme	frostyard-intuneme	trixie,forky	yes	frostyard/snosi	main	-
 # Static Go. frostyard-firn-gui (firn ADR-0021) loads GTK 3, Pango and Cairo
 # with dlopen and declares no Depends; trixie and forky ship the same sonames.
-frostyard/firn	frostyard-firn,frostyard-firn-gui	trixie,forky	yes	frostyard/snosi	main
+frostyard/firn	frostyard-firn,frostyard-firn-gui	trixie,forky	yes	frostyard/snosi	main	-
 # GTK4/libadwaita are loaded at runtime (puregotk, no Depends): trixie until a
 # forky smoke test passes.
-frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	yes	frostyard/snosi	main
+frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	yes	frostyard/snosi	main	-
 # Python, Architecture: all, built and tested on trixie only so far.
-frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi	main
+frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi	main	-
 # bootc (Rust) and libostree-1-1 (C) link trixie's libraries, so their versions
 # carry ~deb13. trixie only until a ~deb14 forky build exists, which must also
 # sort above forky's own libostree-1-1 (2026.4-1). Exact names, not libostree-*,
@@ -44,11 +51,13 @@ frostyard/first-setup	snow-first-setup	trixie	yes	frostyard/snosi	main
 # provenance names refs/heads/main rather than the release tag.
 # image (core ADR-0059 step 5): this libostree-1-1 replaces Debian's, and
 # bootc links against it.
-frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi	image
+frostyard/bootc-debian	bootc,libostree-1-1	trixie	no	frostyard/snosi	image	-
 # The packages of snosi's moonlight and voxtype sysexts (core ADR-0066). The
 # ten other omarchy-apps names left the build with snosi's flurry desktop; a
 # release that still holds one is refused. Exact names. Built in debian:trixie
 # against trixie's libraries without a ~deb13 marker, so trixie only. Not
 # attested: it releases from pushes to main, so its provenance names
-# refs/heads/main rather than the release tag.
-frostyard/omarchy-apps	moonlight-qt,voxtype	trixie	no	frostyard/snosi	main
+# refs/heads/main rather than the release tag. Two versions stay
+# installable: the publication that adds a newer one withdraws the rest
+# (core ADR-0067).
+frostyard/omarchy-apps	moonlight-qt,voxtype	trixie	no	frostyard/snosi	main	2

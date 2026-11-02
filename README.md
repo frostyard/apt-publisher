@@ -104,6 +104,8 @@ Each of these is covered by `tests/run.sh`:
 - a package name that the codename already publishes in the other component;
 - a `~deb14` build targeted at trixie (see [Codenames](#codenames-and-versions));
 - a name/version/arch that is already published with different bytes;
+- a release whose own packages are older than the newest N the producer keeps
+  ([Operations](#operations)): the rule would withdraw them at once;
 - publishing when the bucket doesn't match aptly's database: lost or older
   state, a tampered index, another writer, or a different set of components;
 - importing anything outside the reviewed, verified manifest;
@@ -146,6 +148,10 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
 - **Registration:** add the producer to `config/producers.tsv`. Producers
   that don't attest yet use `attested=no` until they add
   `actions/attest-build-provenance`.
+- **Retention:** column 7, `keep`, is a positive integer N, or `-` for no
+  limit (core ADR-0067). With N, a publication withdraws every version older
+  than the newest N of each of the producer's packages, counted per
+  architecture, in the same run. An empty column means `-`.
 
 ## Codenames and versions
 
@@ -357,6 +363,21 @@ legacy `/public.key` stays unchanged and is not touched.
     version back.
   - The audit reports a withdrawn latest release as missing. That's
     expected, and the audit never republishes.
+- **Retention (keep the newest N):** give a producer `keep=N` in
+  `config/producers.tsv` (core ADR-0067).
+  - The publication that adds newer versions withdraws every older version of
+    the producer's packages, per name and architecture, in the same run: the
+    versions leave the working repository before the snapshot, and one
+    signed `Release` carries both changes.
+  - Versions are ordered with `dpkg --compare-versions`, so epochs and `~`
+    order as apt orders them.
+  - It withdraws from the index only. Pool files stay, so a pruned version
+    comes back only through a rollback to a snapshot that lists it.
+  - `--pruned FILE` lists the withdrawn versions as
+    `codename name version arch component` rows; the run summary names them.
+  - A publication whose own packages would be withdrawn at once, because
+    they are older than the newest N, is refused before any state change.
+  - `-`, or an empty column, keeps every version.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
   spaces. A codename that publishes only `main` takes one. Snapshots that
@@ -436,5 +457,7 @@ The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`,
   [ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md)
   records the organization decision.
   [ADR-0001](docs/adr/0001-aptly-single-writer.md) records this repository's
-  side, and [ADR-0002](docs/adr/0002-two-components-per-codename.md) its
-  two components per codename (core ADR-0059).
+  side, [ADR-0002](docs/adr/0002-two-components-per-codename.md) its
+  two components per codename (core ADR-0059), and
+  [ADR-0003](docs/adr/0003-keep-the-newest-versions-of-a-producer.md) its
+  retention rule (core ADR-0067).

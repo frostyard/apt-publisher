@@ -103,7 +103,7 @@ registered_component() {
 	# must not read as "no registered producer".
 	rows=$(awk -F'\t' '!/^#/ && NF' "$APT_PRODUCERS_FILE") ||
 		die "cannot read the producers file $APT_PRODUCERS_FILE"
-	while IFS=$'\t' read -r repo patterns _ _ _ component; do
+	while IFS=$'\t' read -r repo patterns _ _ _ component _; do
 		[[ -n $patterns ]] || continue
 		matches_globs "$1" "$patterns" || continue
 		if [[ -n $found && $found != "$component" ]]; then
@@ -358,6 +358,71 @@ has_package() {
 	fi
 	[[ $out == *"no results"* ]] && return 1
 	die "cannot search $1 $2 for $3: $out"
+}
+
+# repo_set REPO prints the repository's packages as sorted "name version arch".
+# An empty repository gives nothing; any other aptly error is fatal.
+repo_set() {
+	local out
+	if ! out=$(aptly_ repo search -format='{{.Package}} {{.Version}} {{.Architecture}}' "$1" 2>&1); then
+		[[ $out == *"no results"* ]] || die "cannot search repository $1: $out"
+		return 0
+	fi
+	LC_ALL=C sort -u <<<"$out"
+}
+
+# --- retention (core ADR-0067) --------------------------------------------------
+#
+# A producer may keep only the newest N versions of each of its packages
+# (column 7 of config/producers.tsv). A publication applies the rule in the
+# same publication: the older versions leave the index. No pool file is
+# deleted, so a pruned version comes back only through a rollback.
+
+# version_sort_desc VERSION... prints the versions, newest first. It uses
+# dpkg's ordering, not sort -V: sort -V reads an epoch or a ~ wrongly, and
+# both occur in Frostyard's versions.
+version_sort_desc() {
+	local version i
+	local -a sorted=()
+	for version in "$@"; do
+		i=${#sorted[@]}
+		while ((i > 0)) && dpkg --compare-versions "$version" gt "${sorted[i - 1]}"; do
+			i=$((i - 1))
+		done
+		sorted=("${sorted[@]:0:i}" "$version" "${sorted[@]:i}")
+	done
+	((${#sorted[@]})) || return 0
+	printf '%s\n' "${sorted[@]}"
+}
+
+# retention_rows REPO KEEP PATTERNS prints "name version arch" for every
+# version REPO must drop to keep only its newest KEEP versions of each
+# package. Versions are counted per name and architecture. A name that no
+# glob of PATTERNS matches is never pruned: the repository holds every
+# producer of the component.
+retention_rows() {
+	local repo=$1 keep=$2 patterns=$3 listing key name version arch
+	local -a lines=() versions=() sorted=()
+	local -A by_name=()
+	listing=$(repo_set "$repo") || return 1
+	mapfile -t lines <<<"$listing"
+	for key in "${lines[@]}"; do
+		[[ -n $key ]] || continue
+		read -r name version arch <<<"$key"
+		matches_globs "$name" "$patterns" || continue
+		by_name["$name $arch"]+="$version"$'\n'
+	done
+	((${#by_name[@]})) || return 0
+	# Sorted keys keep the rows in a stable order.
+	while IFS= read -r key; do
+		mapfile -t versions < <(printf '%s' "${by_name[$key]}")
+		mapfile -t sorted < <(version_sort_desc "${versions[@]}")
+		read -r name arch <<<"$key"
+		# The first KEEP versions stay; the rest are rows to prune.
+		for version in "${sorted[@]:keep}"; do
+			printf '%s %s %s\n' "$name" "$version" "$arch"
+		done
+	done < <(printf '%s\n' "${!by_name[@]}" | LC_ALL=C sort)
 }
 
 # one_component_rule CODENAME COMPONENT NAME... refuses a package name that
