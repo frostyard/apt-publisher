@@ -382,6 +382,17 @@ one_component_rule() {
 	done
 }
 
+# repo_set REPO prints the repository's packages as sorted "name version
+# arch". An empty repository gives nothing; any other aptly error is fatal.
+repo_set() {
+	local out
+	if ! out=$(aptly_ repo search -format='{{.Package}} {{.Version}} {{.Architecture}}' "$1" 2>&1); then
+		[[ $out == *"no results"* ]] || die "cannot search repository $1: $out"
+		return 0
+	fi
+	LC_ALL=C sort -u <<<"$out"
+}
+
 # snapshot_names SNAPSHOT prints the package names in SNAPSHOT, sorted and
 # unique. An empty snapshot gives nothing; any other aptly error is fatal.
 snapshot_names() {
