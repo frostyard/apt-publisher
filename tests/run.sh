@@ -146,13 +146,17 @@ scope debian
 run() { APTLY_ROOT=$(mktemp -d "$tmp/runner.XXXXXX") "$ROOT/scripts/$1" "${@:2}"; }
 
 # mkdeb DIR NAME VERSION ARCH [CONTENT] builds DIR/NAME_VERSION_ARCH.deb, with
-# the epoch left out of the file name as Debian does.
+# the epoch left out of the file name as Debian does. MKDEB_CONTROL adds one
+# control line (for example a Provides: line).
 mkdeb() {
 	local dir=$1 name=$2 version=$3 arch=$4 src
 	src=$(mktemp -d "$tmp/build.XXXXXX")
 	mkdir -p "$src/DEBIAN" "$src/usr/share/doc/$name" "$dir"
 	printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: test <test@invalid>\nDescription: test package\n' \
 		"$name" "$version" "$arch" >"$src/DEBIAN/control"
+	if [[ -n ${MKDEB_CONTROL:-} ]]; then
+		printf '%s\n' "$MKDEB_CONTROL" >>"$src/DEBIAN/control"
+	fi
 	printf '%s\n' "${5:-$name $version $arch}" >"$src/usr/share/doc/$name/content"
 	dpkg-deb --root-owner-group -b "$src" "$dir/${name}_${version#*:}_${arch}.deb" >/dev/null
 }
@@ -2330,6 +2334,167 @@ must_fail "a name registered for a component the codename lacks is refused" \
 	env APT_CODENAMES_FILE="$tmp/codenames-main.tsv" APT_PRODUCERS_FILE="$tmp/producers-move-image.tsv" \
 	APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/move.sh"
 check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# --- retention (core ADR-0067) ---------------------------------------------------
+#
+# A producer's keep column (config/producers.tsv column 7) keeps only the
+# newest N versions of each of its packages, counted per name and
+# architecture. The publication that adds newer versions withdraws the rest
+# from the index in the same run; pool files stay. A six-column row and a -
+# row keep every version.
+
+scope retention
+export APT_CODENAMES_FILE=$tmp/codenames-main.tsv APT_PRODUCERS_FILE=$tmp/producers-retain.tsv
+cat >"$tmp/producers-retain.tsv" <<'EOF'
+frostyard/trixie-only	trixie-thing	trixie	no	-	main
+frostyard/dasher	dasher-*	trixie	no	-	main	-
+frostyard/keeper	keeper-*	trixie	no	-	main	2
+frostyard/provider	provider-*	trixie	no	-	main	-
+EOF
+# The same rows with keeper on - (no limit), for the three versions that a
+# later run with keep 2 prunes, and one row with a keep value to refuse.
+cat >"$tmp/producers-retain-nolimit.tsv" <<'EOF'
+frostyard/trixie-only	trixie-thing	trixie	no	-	main
+frostyard/dasher	dasher-*	trixie	no	-	main	-
+frostyard/keeper	keeper-*	trixie	no	-	main	-
+EOF
+cat >"$tmp/producers-retain-bad.tsv" <<'EOF'
+frostyard/keeper	keeper-*	trixie	no	-	main	0
+EOF
+cat >"$tmp/producers-retain-big.tsv" <<'EOF'
+frostyard/keeper	keeper-*	trixie	no	-	main	18446744073709551617
+EOF
+
+# keep_publish DESC PRODUCER DIR publishes DIR to trixie and writes the
+# withdrawn rows to $tmp/pruned.tsv.
+keep_publish() {
+	local desc=$1 producer=$2 dir=$3
+	must_pass "$desc" run publish.sh --producer "$producer" --debs "$dir" --codenames trixie \
+		--pruned "$tmp/pruned.tsv"
+}
+
+# Another producer's name and a six-column row: nothing is pruned.
+mkdeb "$tmp/rt-six" trixie-thing 1.0 amd64
+mkdeb "$tmp/rt-six" trixie-thing 2.0 amd64
+mkdeb "$tmp/rt-six" trixie-thing 3.0 amd64
+keep_publish "a six-column producer publishes three versions" frostyard/trixie-only "$tmp/rt-six"
+check "a six-column row keeps every version" listed trixie trixie-thing 1.0
+check "the six-column row keeps the middle version too" listed trixie trixie-thing 2.0
+check "the six-column row writes an empty report" test -f "$tmp/pruned.tsv" -a ! -s "$tmp/pruned.tsv"
+mkdeb "$tmp/rt-dash" dasher-one 1.0 amd64
+mkdeb "$tmp/rt-dash" dasher-one 2.0 amd64
+mkdeb "$tmp/rt-dash" dasher-one 3.0 amd64
+keep_publish "a - row publishes three versions" frostyard/dasher "$tmp/rt-dash"
+check "a - row keeps every version" listed trixie dasher-one 1.0
+check "a - row keeps the middle version too" listed trixie dasher-one 2.0
+check "a - row writes an empty report" test -f "$tmp/pruned.tsv" -a ! -s "$tmp/pruned.tsv"
+
+# Three releases of the same packages: the third keeps the newest two.
+mkdeb "$tmp/rt1" keeper-main 1.9 amd64
+mkdeb "$tmp/rt1" keeper-tilde 2.0 amd64
+mkdeb "$tmp/rt1" keeper-epoch 1.5 amd64
+mkdeb "$tmp/rt1" keeper-arch 1.0 amd64
+mkdeb "$tmp/rt1" keeper-arch 1.0 arm64
+# An Architecture: all build with the version that amd64 prunes later.
+mkdeb "$tmp/rt1" keeper-main 1.9 all
+keep_publish "a first keeper release" frostyard/keeper "$tmp/rt1"
+# Another producer's package that provides the version amd64 prunes later.
+MKDEB_CONTROL='Provides: keeper-main (= 1.9)' mkdeb "$tmp/rt-prov" provider-x 5.0 amd64
+keep_publish "a package that provides a keeper version" frostyard/provider "$tmp/rt-prov"
+check "the first keeper release is listed" listed trixie keeper-main 1.9
+check "a first release writes an empty report" test -f "$tmp/pruned.tsv" -a ! -s "$tmp/pruned.tsv"
+mkdeb "$tmp/rt2" keeper-main 1.10 amd64
+mkdeb "$tmp/rt2" keeper-tilde 2.0~rc1 amd64
+mkdeb "$tmp/rt2" keeper-epoch 2.0 amd64
+mkdeb "$tmp/rt2" keeper-arch 2.0 amd64
+mkdeb "$tmp/rt2" keeper-arch 2.0 arm64
+keep_publish "a second keeper release" frostyard/keeper "$tmp/rt2"
+check "two versions are within the limit" listed trixie keeper-main 1.10
+check "the older of two versions stays" listed trixie keeper-main 1.9
+check "a ~ prerelease is older than its release, so both stay" listed trixie keeper-tilde 2.0
+check "a second release writes an empty report" test -f "$tmp/pruned.tsv" -a ! -s "$tmp/pruned.tsv"
+mkdeb "$tmp/rt3" keeper-main 6.2.0-frostyard20261102153446 amd64
+mkdeb "$tmp/rt3" keeper-tilde 2.1 amd64
+mkdeb "$tmp/rt3" keeper-epoch 10:0.1 amd64
+mkdeb "$tmp/rt3" keeper-arch 3.0 amd64
+keep_publish "a third keeper release" frostyard/keeper "$tmp/rt3"
+check "the newest version is listed" listed trixie keeper-main 6.2.0-frostyard20261102153446
+check "the second newest version is listed" listed trixie keeper-main 1.10
+check "the oldest version left the index" not_listed trixie keeper-main 1.9 amd64
+check "the all build of that version stays" listed trixie keeper-main 1.9 all
+check "a package that provides the pruned version stays" listed trixie provider-x 5.0
+check "the pruned version's pool file stays" test -n "$(pool_file keeper-main_1.9_amd64.deb)"
+check "a newer release is listed above its ~ prerelease" listed trixie keeper-tilde 2.1
+check "the ~ prerelease left the index" not_listed trixie keeper-tilde 2.0~rc1
+check "its release stays" listed trixie keeper-tilde 2.0
+check "the newest epoch version is listed" listed trixie keeper-epoch 10:0.1
+check "the version below it stays" listed trixie keeper-epoch 2.0
+check "the oldest epoch version left the index" not_listed trixie keeper-epoch 1.5
+check "amd64 pruned its oldest version" not_listed trixie keeper-arch 1.0 amd64
+check "arm64 kept two versions of the same name" listed trixie keeper-arch 1.0 arm64
+check "the pruned amd64 pool file stays" test -n "$(pool_file keeper-arch_1.0_amd64.deb)"
+check "the run logged each pruned version" grep -qx 'prune trixie main keeper-main 1.9 amd64' "$tmp/err"
+pruned_want=$(printf 'trixie\tkeeper-arch\t1.0\tamd64\tmain\ntrixie\tkeeper-epoch\t1.5\tamd64\tmain\ntrixie\tkeeper-main\t1.9\tamd64\tmain\ntrixie\tkeeper-tilde\t2.0~rc1\tamd64\tmain')
+check "--pruned writes codename name version arch component rows" test "$(cat "$tmp/pruned.tsv")" = "$pruned_want"
+check "another producer's versions stay" listed trixie trixie-thing 1.0
+check "another producer's middle version stays" listed trixie trixie-thing 2.0
+check "a - producer's versions stay" listed trixie dasher-one 1.0
+
+# A release older than the newest N is refused before any state change.
+mkdeb "$tmp/rt-old" keeper-main 0.9 amd64
+before=$(inrelease trixie)
+state_before=$(state_sum)
+must_fail "a release older than the newest N is refused" \
+	"keeper-main 0.9 amd64 is older than the newest 2 published versions; retention would withdraw it at once" \
+	run publish.sh --producer frostyard/keeper --debs "$tmp/rt-old" --codenames trixie
+check "the refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+check "the refusal left the state bucket unchanged" test "$(state_sum)" = "$state_before"
+
+# - keeps three versions; switching the row to 2 and re-running the newest
+# release prunes the oldest versions, including that of a package the
+# release does not hold at all.
+export APT_PRODUCERS_FILE=$tmp/producers-retain-nolimit.tsv
+mkdeb "$tmp/rt-none1" keeper-rerun 1.0 amd64
+mkdeb "$tmp/rt-none1" keeper-rerun 2.0 amd64
+mkdeb "$tmp/rt-none1" keeper-hold 1.0 amd64
+mkdeb "$tmp/rt-none1" keeper-hold 2.0 amd64
+mkdeb "$tmp/rt-none1" keeper-hold 3.0 amd64
+keep_publish "a keeper release while its row has no limit" frostyard/keeper "$tmp/rt-none1"
+mkdeb "$tmp/rt-none2" keeper-rerun 3.0 amd64
+keep_publish "a third version while the row has no limit" frostyard/keeper "$tmp/rt-none2"
+check "a - row keeps three versions" listed trixie keeper-rerun 1.0
+check "a - row keeps the newest of three" listed trixie keeper-rerun 3.0
+check "a - row keeps a package no later release holds" listed trixie keeper-hold 3.0
+export APT_PRODUCERS_FILE=$tmp/producers-retain.tsv
+before=$(inrelease trixie)
+keep_publish "a re-run of the newest release applies the rule and publishes" frostyard/keeper "$tmp/rt-none2"
+check "the re-run left the oldest version out" not_listed trixie keeper-rerun 1.0
+check "the re-run kept the newest two" listed trixie keeper-rerun 2.0
+check "the re-run kept the release itself" listed trixie keeper-rerun 3.0
+check "a package the release does not hold keeps its newest two" not_listed trixie keeper-hold 1.0
+check "that package's other versions stay" listed trixie keeper-hold 2.0
+check "the re-run published a new Release" test "$(inrelease trixie)" != "$before"
+check "the re-run logged a package the release does not hold" grep -qx 'prune trixie main keeper-hold 1.0 amd64' "$tmp/err"
+check "the re-run deletes no pool file" test -n "$(pool_file keeper-rerun_1.0_amd64.deb)"
+rerun_want=$(printf 'trixie\tkeeper-hold\t1.0\tamd64\tmain\ntrixie\tkeeper-rerun\t1.0\tamd64\tmain')
+check "--pruned lists both withdrawn versions" test "$(cat "$tmp/pruned.tsv")" = "$rerun_want"
+
+# A dry run names the rule; a producer with no limit logs no rule.
+must_pass "a dry run of a keeper release" run publish.sh --producer frostyard/keeper --debs "$tmp/rt3" --dry-run
+check "the dry run names the retention rule" \
+	grep -qx 'retention: keep the newest 2 versions of each package of frostyard/keeper in main' "$tmp/err"
+must_pass "a dry run of a producer with no limit" run publish.sh --producer frostyard/dasher --debs "$tmp/rt-dash" --dry-run
+check "a producer with no limit logs no retention rule" test -z "$(grep 'retention:' "$tmp/err" || true)"
+
+# An invalid keep value is refused before any state change.
+before=$(inrelease trixie)
+must_fail "an invalid keep value is refused" "has keep '0' in config/producers.tsv" \
+	env APT_PRODUCERS_FILE="$tmp/producers-retain-bad.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/keeper --debs "$tmp/rt3" --codenames trixie
+check "the invalid keep refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_fail "a keep value above 999 is refused" "give an integer from 1 to 999" \
+	env APT_PRODUCERS_FILE="$tmp/producers-retain-big.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/keeper --debs "$tmp/rt3" --codenames trixie
 
 # The secrets check reads no codename list, as in the section before this one.
 unset APT_CODENAMES_FILE

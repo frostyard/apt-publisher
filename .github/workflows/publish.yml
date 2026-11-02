@@ -80,7 +80,7 @@ jobs:
         id: publish
         run: |
           args=(--producer "$PRODUCER" --debs "$RUNNER_TEMP/debs" --label "${PRODUCER#*/}-$TAG"
-            --report "$RUNNER_TEMP/report.tsv")
+            --report "$RUNNER_TEMP/report.tsv" --pruned "$RUNNER_TEMP/pruned.tsv")
           if [[ -n $CODENAMES ]]; then args+=(--codenames "$CODENAMES"); fi
           scripts/publish.sh "${args[@]}" | tee "$RUNNER_TEMP/published.txt"
           echo "codenames=$(cut -d' ' -f1 "$RUNNER_TEMP/published.txt" | xargs)" >>"$GITHUB_OUTPUT"
@@ -92,6 +92,18 @@ jobs:
             # shellcheck disable=SC2016 # literal Markdown backticks
             sed 's/^\([^ ]*\) \(.*\)$/| \1 | `\2` |/' "$RUNNER_TEMP/published.txt"
           } >>"$GITHUB_STEP_SUMMARY"
+          # Retention (core ADR-0067) withdrew older versions in the same run.
+          if [[ -s $RUNNER_TEMP/pruned.tsv ]]; then
+            {
+              echo
+              echo '### Withdrawn by retention'
+              echo
+              echo '| Codename | Package | Version | Architecture | Component |'
+              echo '| --- | --- | --- | --- | --- |'
+              awk -F'\t' '{ printf "| %s | %s | %s | %s | %s |\n", $1, $2, $3, $4, $5 }' \
+                "$RUNNER_TEMP/pruned.tsv"
+            } >>"$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Purge CDN cache
         env:

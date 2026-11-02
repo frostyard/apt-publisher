@@ -19,7 +19,18 @@
 # codename the request does not target (several, space-separated, when a run
 # adds more than one). With --report FILE, also writes
 # "codename name version arch component" rows for the packages it published
-# (the input of apt-canary.sh).
+# (the input of apt-canary.sh). With --pruned FILE, writes the rows of the
+# versions retention withdrew in this run, or an empty file when it withdrew
+# none.
+#
+# Retention (core ADR-0067): column 7 of config/producers.tsv, keep, holds
+# how many of the newest versions of each of the producer's packages stay.
+# The publication that adds newer ones withdraws the rest from the index in
+# the same publication: they leave the working repository before the
+# snapshot, so no pool file is deleted. A publication whose own packages
+# would be withdrawn at once is refused before any state changes. A pruned
+# version comes back through a rollback to a snapshot that lists it, or
+# through a republication while it is within the newest N.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -27,19 +38,20 @@
 usage() {
 	cat >&2 <<'EOF'
 usage: publish.sh --producer OWNER/REPO --debs DIR [--codenames "trixie forky"]
-                  [--label TEXT] [--report FILE] [--dry-run]
+                  [--label TEXT] [--report FILE] [--pruned FILE] [--dry-run]
 
   --producer   registered producer (config/producers.tsv)
   --debs       directory holding the release's .deb files
   --codenames  target codenames; default: the producer's configured list
   --label      snapshot name suffix, e.g. updex-v2.0.2; default: producer name
   --report     write the published packages as TSV to FILE
+  --pruned     write the withdrawn packages as TSV to FILE (empty if none)
   --dry-run    validate and print the routing, then stop
 EOF
 	exit 2
 }
 
-producer='' debs_dir='' codenames='' label='' report='' dry_run=0
+producer='' debs_dir='' codenames='' label='' report='' pruned_file='' dry_run=0
 while (($#)); do
 	case $1 in
 	--producer) producer=${2:?} && shift ;;
@@ -47,17 +59,25 @@ while (($#)); do
 	--codenames) codenames=${2:?} && shift ;;
 	--label) label=${2:?} && shift ;;
 	--report) report=${2:?} && shift ;;
+	--pruned) pruned_file=${2:?} && shift ;;
 	--dry-run) dry_run=1 ;;
 	*) usage ;;
 	esac
 	shift
 done
 [[ -n $producer && -n $debs_dir ]] || usage
-require dpkg-deb
+require dpkg dpkg-deb
 
 patterns=$(producer_field "$producer" 2) || die "$producer is not a registered producer"
 allowed=$(producer_field "$producer" 3)
 component=$(producer_field "$producer" 6)
+# A row without column 7 (test fixtures) reads as -: no limit. The bound
+# keeps the count far from bash's integer limits.
+keep=$(producer_field "$producer" 7)
+if [[ -n $keep && $keep != - ]]; then
+	[[ $keep =~ ^[1-9][0-9]{0,2}$ ]] ||
+		die "producer $producer has keep '$keep' in config/producers.tsv: give an integer from 1 to 999, or - for no limit"
+fi
 codenames=${codenames:-${allowed//,/ }}
 label=${label:-${producer#*/}}
 
@@ -74,7 +94,7 @@ debs=("$debs_dir"/*.deb)
 
 # Route each package to its codenames: a ~debNN/+debNN version goes only to
 # the codename for Debian NN; an unmarked version goes to every target.
-declare -A files=() expect=() names=()
+declare -A files=() expect=() names=() releases=()
 rows=()
 for deb in "${debs[@]}"; do
 	name=$(dpkg-deb -f "$deb" Package)
@@ -95,12 +115,16 @@ for deb in "${debs[@]}"; do
 		files[$codename]+="$deb"$'\n'
 		expect[$codename]+="$component/$name=$version "
 		names[$codename]+="$name "
+		releases[$codename]+="$name $version $arch"$'\n'
 		rows+=("$codename"$'\t'"$name"$'\t'"$version"$'\t'"$arch"$'\t'"$component")
 		log "route $(basename "$deb") -> $codename/$component"
 	done
 done
 
 if ((dry_run)); then
+	if [[ -n $keep && $keep != - ]]; then
+		log "retention: keep the newest $keep versions of each package of $producer in $component"
+	fi
 	log "dry run: nothing published"
 	exit 0
 fi
@@ -133,8 +157,9 @@ while IFS= read -r codename; do
 	extra_codenames+=("$codename")
 done < <(awk -F'\t' '!/^#/ && NF { print $1 }' "$APT_CODENAMES_FILE")
 
-declare -A snapshots=()
+declare -A snapshots=() pruned_specs=()
 commits=()
+pruned_rows=()
 for codename in $codenames; do
 	if [[ -z ${files[$codename]:-} ]]; then
 		log "no packages for $codename"
@@ -145,6 +170,48 @@ for codename in $codenames; do
 	repo=$(ensure_repo "$codename" "$component")
 	mapfile -t list <<<"${files[$codename]%$'\n'}"
 	aptly_ repo add "$repo" "${list[@]}" >&2
+	if [[ -n $keep && $keep != - ]]; then
+		# Retention (core ADR-0067): older versions leave the working
+		# repository before the snapshot, so this publication withdraws
+		# them. Nothing was saved yet, so a refusal changes no state.
+		pruned_pairs=()
+		prune=$(retention_rows "$repo" "$keep" "$patterns") ||
+			die "cannot apply retention to $repo"
+		before_prune=$(repo_set "$repo")
+		while read -r name version arch; do
+			[[ -n $name ]] || continue
+			if grep -qxF -- "$name $version $arch" <<<"${releases[$codename]:-}"; then
+				die "$name $version $arch is older than the newest $keep published versions; retention would withdraw it at once"
+			fi
+			log "prune $codename $component $name $version $arch"
+			# The package key NAME_VERSION_ARCH matches that one package. A
+			# dependency query (NAME (= VERSION) {ARCH}) would also match
+			# packages that provide NAME, Architecture: all packages, and
+			# other spellings of an equal version.
+			aptly_ repo remove "$repo" "${name}_${version}_${arch}" >&2
+			pruned_pairs+=("$name=$version")
+			pruned_rows+=("$codename"$'\t'"$name"$'\t'"$version"$'\t'"$arch"$'\t'"$component")
+		done <<<"$prune"
+		# The repository must now hold exactly what it held before, less
+		# the planned rows: anything else is refused before the commit.
+		want=$(LC_ALL=C comm -23 <(printf '%s\n' "$before_prune") \
+			<(printf '%s\n' "$prune" | sed '/^$/d' | LC_ALL=C sort -u) | sed '/^$/d')
+		got=$(repo_set "$repo")
+		[[ $got == "$want" ]] ||
+			die "retention changed $repo beyond its plan; nothing was published"
+		if ((${#pruned_pairs[@]})); then
+			# Read back from the repository: a version that another
+			# architecture keeps stays listed.
+			remaining=$(repo_set "$repo")
+			for pair in "${pruned_pairs[@]}"; do
+				if awk -v n="${pair%%=*}" -v v="${pair#*=}" \
+					'$1 == n && $2 == v { found = 1 } END { exit !found }' <<<"$remaining"; then
+					continue
+				fi
+				pruned_specs[$codename]+="!$component/$pair "
+			done
+		fi
+	fi
 	snapshots[$codename]=$(new_snapshot_name "$codename" "$component" "$label")
 	aptly_ snapshot create "${snapshots[$codename]}" from repo "$repo" >/dev/null
 	commits+=("$codename/$component=${snapshots[$codename]}")
@@ -177,10 +244,16 @@ for codename in "${extra_codenames[@]}"; do
 done
 
 for codename in "${!snapshots[@]}"; do
-	# shellcheck disable=SC2086 # expect holds space-separated NAME=VERSION words
-	verify_published "$codename" ${expect[$codename]:-}
+	# shellcheck disable=SC2086 # expect and pruned_specs hold space-separated specs
+	verify_published "$codename" ${expect[$codename]:-} ${pruned_specs[$codename]:-}
 	printf '%s %s\n' "$codename" "${snapshots[$codename]}"
 done
 if [[ -n $report ]]; then
 	printf '%s\n' "${rows[@]}" | sort -u >"$report"
+fi
+if [[ -n $pruned_file ]]; then
+	: >"$pruned_file"
+	if ((${#pruned_rows[@]})); then
+		printf '%s\n' "${pruned_rows[@]}" | sort -u >"$pruned_file"
+	fi
 fi
