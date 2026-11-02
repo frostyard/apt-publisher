@@ -1578,6 +1578,121 @@ check "main keeps the other version" listed_in trixie main frostyard-updex 1.1
 check "image is empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
 must_pass "the withdrawal's suite verifies" run verify.sh trixie --deep
 
+# A batch withdrawal withdraws many versions from one codename in one
+# publication, all or nothing, and --dry-run resolves the plan from the
+# published index alone, so it needs no credentials and changes nothing.
+scope batchwithdraw
+export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/producers-image.tsv
+export APT_WITHDRAWALS_DIR=$tmp/withdrawals
+mkdir -p "$APT_WITHDRAWALS_DIR"
+
+# One publish call per producer and release directory, as a producer does.
+mkdeb "$tmp/bw-updex-10" frostyard-updex 1.0 amd64
+mkdeb "$tmp/bw-updex-11" frostyard-updex 1.1 amd64
+mkdeb "$tmp/bw-updex-11" frostyard-updex 1.1 arm64
+mkdeb "$tmp/bw-updex-12" frostyard-updex 1.2 amd64
+mkdeb "$tmp/bw-thing" trixie-thing 1.0 amd64
+mkdeb "$tmp/bw-img-10" imgpkg 1.0 amd64
+mkdeb "$tmp/bw-img-20" imgpkg 2.0 amd64
+for d in bw-updex-10 bw-updex-11 bw-updex-12; do
+	must_pass "publish $d" run publish.sh --producer frostyard/updex --debs "$tmp/$d"
+done
+must_pass "publish trixie-thing 1.0" run publish.sh --producer frostyard/trixie-only --debs "$tmp/bw-thing"
+for d in bw-img-10 bw-img-20; do
+	must_pass "publish $d" run publish.sh --producer frostyard/image-only --debs "$tmp/$d"
+done
+
+cat >"$APT_WITHDRAWALS_DIR/b1.txt" <<'EOF'
+# keep frostyard-updex 1.2, trixie-thing 1.0 and imgpkg 2.0
+
+frostyard-updex 1.0 amd64
+frostyard-updex 1.1
+imgpkg 1.0 amd64
+EOF
+trixie_before=$(inrelease trixie)
+forky_before=$(inrelease forky)
+
+# A dry run needs neither credentials nor aptly state.
+plan=$(printf '%s\n' \
+	'withdraw trixie main frostyard-updex 1.0 amd64' \
+	'withdraw trixie main frostyard-updex 1.1 amd64' \
+	'withdraw trixie main frostyard-updex 1.1 arm64' \
+	'withdraw trixie image imgpkg 1.0 amd64')
+must_pass "a batch dry run needs no credentials" \
+	env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/withdraw.sh" \
+	--codename trixie --batch b1.txt --dry-run
+check "the batch dry run prints nothing on stdout" test -z "$(cat "$tmp/out")"
+check "the batch dry run prints exactly the plan" test "$(grep '^withdraw ' "$tmp/err")" = "$plan"
+check "the batch dry run left InRelease unchanged" test "$(inrelease trixie)" = "$trixie_before"
+
+must_pass "a batch withdrawal publishes one Release" run withdraw.sh --codename trixie --batch b1.txt
+check "the batch withdrawal prints one line" test "$(wc -l <"$tmp/out")" = 1
+check "the line names the codename and the snapshots of both components" test "$(wc -w <"$tmp/out")" = 3
+check "the line starts with the codename" test "$(cut -d' ' -f1 "$tmp/out")" = trixie
+check "the main snapshot is named for the batch" \
+	matches "^trixie-$snapshot_re-withdraw-b1\$" "$(cut -d' ' -f2 "$tmp/out")"
+check "the image snapshot is named for the batch" \
+	matches "^trixie-image-$snapshot_re-withdraw-b1\$" "$(cut -d' ' -f3 "$tmp/out")"
+check "main no longer lists 1.0" not_listed_in trixie main frostyard-updex 1.0 amd64
+check "main no longer lists 1.1 in either architecture" not_listed_in trixie main frostyard-updex 1.1
+check "image no longer lists imgpkg 1.0" not_listed_in trixie image imgpkg 1.0 amd64
+check "main keeps the version no row named" listed_in trixie main frostyard-updex 1.2 amd64
+check "main keeps another producer's package" listed_in trixie main trixie-thing 1.0 amd64
+check "image keeps its other version" listed_in trixie image imgpkg 2.0 amd64
+check "the batch deletes no pool file of a withdrawn version" test -n "$(pool_file 'frostyard-updex_1.0_amd64.deb')"
+check "the batch deletes no pool file of the withdrawn architecture" test -n "$(pool_file 'frostyard-updex_1.1_arm64.deb')"
+check "the batch deletes no image pool file" test -n "$(pool_file 'imgpkg_1.0_amd64.deb')"
+must_pass "the withdrawn suite passes the deep check" run verify.sh trixie --deep
+check "the batch left forky unchanged" test "$(inrelease forky)" = "$forky_before"
+
+# The same batch again has nothing left to withdraw.
+before=$(inrelease trixie)
+must_fail "a batch whose versions are gone is refused" "has no" \
+	run withdraw.sh --codename trixie --batch b1.txt
+check "the refused batch left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# One unresolvable row refuses the whole batch, live and in a dry run.
+printf 'frostyard-updex 1.2 amd64\nfrostyard-updex 9.9 amd64\n' >"$APT_WITHDRAWALS_DIR/b2.txt"
+must_fail "a batch with one unresolvable row is refused" "has no" \
+	run withdraw.sh --codename trixie --batch b2.txt
+check "the refused batch kept the resolvable version" listed_in trixie main frostyard-updex 1.2 amd64
+check "the refused batch left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_fail "a dry run refuses an unresolvable row too" "has no" \
+	env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/withdraw.sh" \
+	--codename trixie --batch b2.txt --dry-run
+
+printf '# comment\nfrostyard-updex 1.2 amd64\nfrostyard-updex 1.2 amd64\n' >"$APT_WITHDRAWALS_DIR/dup.txt"
+must_fail "a batch with a duplicate row is refused" "duplicate" \
+	run withdraw.sh --codename trixie --batch dup.txt
+printf '# comment\nfrostyard-updex 1.2 amd64\nfrostyard-updex 1.2 amd64 extra\n' >"$APT_WITHDRAWALS_DIR/fields.txt"
+must_fail "a batch row with four fields is refused with its line number" "line 3" \
+	run withdraw.sh --codename trixie --batch fields.txt
+printf 'Bad 1.0 amd64\n' >"$APT_WITHDRAWALS_DIR/badname.txt"
+must_fail "a batch row with a malformed name is refused" "invalid package name" \
+	run withdraw.sh --codename trixie --batch badname.txt
+must_fail "a batch name with a path is refused" "invalid batch name" \
+	run withdraw.sh --codename trixie --batch ../b1.txt
+must_fail "a missing batch file is refused" "cannot read the batch file" \
+	run withdraw.sh --codename trixie --batch no-such-batch.txt
+must_fail "a batch and a package cannot be combined" "usage" \
+	run withdraw.sh --codename trixie --batch b1.txt --package frostyard-updex
+must_fail "a batch requires a known codename" "unknown codename" \
+	run withdraw.sh --codename stable --batch b1.txt
+printf '# only a comment\n\n' >"$APT_WITHDRAWALS_DIR/empty.txt"
+must_fail "an empty batch is refused" "lists no request row" \
+	run withdraw.sh --codename trixie --batch empty.txt
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# The single mode is a batch of one request row, so it has the dry run too.
+must_pass "a single withdrawal has a dry run" \
+	run withdraw.sh --codename trixie --package frostyard-updex --version 1.2 --dry-run
+check "the single dry run prints one plan line" test "$(grep -c '^withdraw ' "$tmp/err")" = 1
+check "the single dry run names the row" grep -qx 'withdraw trixie main frostyard-updex 1.2 amd64' "$tmp/err"
+check "the single dry run prints nothing on stdout" test -z "$(cat "$tmp/out")"
+check "the single dry run left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+unset APT_WITHDRAWALS_DIR
+
 # A rollback adds the component too, and then needs one snapshot per component.
 scope addrollback
 mkdeb "$tmp/arb-a" frostyard-updex 1.0 amd64

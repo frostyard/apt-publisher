@@ -43,6 +43,27 @@ awk -F'\t' 'FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 	if (seen[$1]++) { print "producers.tsv line " FNR ": duplicate producer " $1; bad = 1 }
 } END { exit bad }' codenames="$APT_CODENAMES_FILE" "$APT_CODENAMES_FILE" "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
 
+# withdrawals/: the batch files withdraw.sh reads, one "NAME VERSION [ARCH]"
+# request row per line. The rows keep the shapes of the aptly query
+# withdraw.sh builds (the same regular expressions), and no row repeats, so
+# that a batch is what it looks like before anyone runs it.
+for file in "$ROOT"/withdrawals/*; do
+	[[ -e $file ]] || continue
+	# awk prints one line per problem and exits 0, so that a real awk
+	# failure stays a failure of this check.
+	problem=$(awk '
+		/^[[:space:]]*(#|$)/ { next }
+		{
+			if (NF < 2 || NF > 3) { print "line " FNR ": expected NAME VERSION [ARCH], got " NF " fields"; next }
+			if ($1 !~ /^[a-z0-9][a-z0-9.+-]*$/) { print "line " FNR ": invalid package name " $1 }
+			if ($2 !~ /^[A-Za-z0-9.+~:-]+$/) { print "line " FNR ": invalid version " $2 }
+			if (NF == 3 && $3 !~ /^[a-z0-9]+$/) { print "line " FNR ": invalid architecture " $3 }
+			key = $1 SUBSEP $2 SUBSEP $3
+			if (seen[key]++) { print "line " FNR ": duplicate request " $1 " " $2 " " $3 }
+		}' "$file")
+	[[ -z $problem ]] || fail "withdrawals/$(basename "$file") ${problem%%$'\n'*}"
+done
+
 # Every workflow that can reach the writer's credentials (the apt-repository
 # environment) queues in the one writer group, keeping up to 100 pending runs
 # instead of GitHub's default of one. The writers must be among them.

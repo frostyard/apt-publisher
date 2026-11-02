@@ -357,6 +357,17 @@ legacy `/public.key` stays unchanged and is not touched.
     version back.
   - The audit reports a withdrawn latest release as missing. That's
     expected, and the audit never republishes.
+- **Withdraw a batch:** commit a file in `withdrawals/` with one
+  `NAME VERSION [ARCH]` request row per line (a `#` line is a comment), then
+  run **withdraw** with that codename and the file name as `batch`.
+  - It resolves every row against the published codename first: a row that
+    matches nothing, or a name that two components hold, refuses the whole
+    batch, so either every row is withdrawn or nothing is.
+  - The rows of one component leave its working repository with one aptly
+    call, and every changed component is published in one signed Release.
+  - Set `dry_run` to print the plan from the published index alone; it needs
+    no credentials and changes nothing. Use it first.
+  - The files stay in the pool, as for one version.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
   spaces. A codename that publishes only `main` takes one. Snapshots that

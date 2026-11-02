@@ -81,17 +81,6 @@ for codename in "${codenames[@]}"; do
 	codename_field "$codename" 1 >/dev/null || die "unknown codename $codename"
 done
 
-# repo_set REPO prints the repository's packages as sorted "name version arch".
-# An empty repository gives nothing; any other aptly error is fatal.
-repo_set() {
-	local out
-	if ! out=$(aptly_ repo search -format='{{.Package}} {{.Version}} {{.Architecture}}' "$1" 2>&1); then
-		[[ $out == *"no results"* ]] || die "cannot search repository $1: $out"
-		return 0
-	fi
-	LC_ALL=C sort -u <<<"$out"
-}
-
 # The move marker (move_file in lib.sh) holds "COMPONENT SNAPSHOT" lines for
 # the changed components and "row NAME VERSION ARCH FROM TO" lines for the
 # plan. marker_snapshots and marker_rows print the two kinds.

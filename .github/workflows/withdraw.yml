@@ -1,5 +1,9 @@
-# Withdraw one package version from a codename, leaving everything else
-# published. The file stays in the pool; republishing the release restores it.
+# Withdraw one package version, or a batch of them, from a codename, leaving
+# everything else published. A batch is a file in withdrawals/ with one
+# "NAME VERSION [ARCH]" request row per line; its rows are withdrawn in one
+# publication, all or nothing. The files stay in the pool; republishing the
+# release restores them. Run it with dry_run first: it prints the plan from
+# the published index and changes nothing.
 name: withdraw
 
 on:
@@ -10,14 +14,21 @@ on:
         type: choice
         options: [trixie, forky]
       package:
-        description: Package name
-        required: true
+        description: Package name (empty with a batch)
+        required: false
       version:
-        description: Exact version
-        required: true
+        description: Exact version (empty with a batch)
+        required: false
       arch:
         description: Only this architecture (empty withdraws every architecture)
         required: false
+      batch:
+        description: A file name in withdrawals/ (instead of package, version and arch)
+        required: false
+      dry_run:
+        description: Print the plan from the public index and change nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,10 +51,13 @@ jobs:
     timeout-minutes: 30
     environment: apt-repository
     env:
+      # Request values reach scripts only through the environment.
       CODENAME: ${{ inputs.codename }}
       PACKAGE: ${{ inputs.package }}
       VERSION: ${{ inputs.version }}
       ARCH: ${{ inputs.arch }}
+      BATCH: ${{ inputs.batch }}
+      DRY_RUN: ${{ inputs.dry_run }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -53,18 +67,48 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
 
+      # A dry run only reads the published index, so it signs nothing.
       - name: Import signing key
+        if: ${{ !inputs.dry_run }}
         env:
           APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
         run: scripts/import-signing-key.sh
 
       - name: Withdraw
         run: |
-          args=(--codename "$CODENAME" --package "$PACKAGE" --version "$VERSION")
-          if [[ -n $ARCH ]]; then args+=(--arch "$ARCH"); fi
-          scripts/withdraw.sh "${args[@]}"
+          # The plan goes to stderr and the published snapshots to stdout.
+          # pipefail (defaults above) makes a failed withdrawal fail the step.
+          args=(--codename "$CODENAME")
+          if [[ -n $BATCH ]]; then
+            args+=(--batch "$BATCH")
+          else
+            args+=(--package "$PACKAGE" --version "$VERSION")
+            if [[ -n $ARCH ]]; then args+=(--arch "$ARCH"); fi
+          fi
+          if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
+          scripts/withdraw.sh "${args[@]}" 2>&1 >"$RUNNER_TEMP/withdrawn.txt" | tee "$RUNNER_TEMP/withdraw.log"
+          {
+            if [[ $DRY_RUN == true ]]; then
+              echo "### Withdrawal plan (dry run, nothing changed)"
+            else
+              echo "### Withdrawal"
+            fi
+            echo
+            echo '```'
+            grep '^withdraw ' "$RUNNER_TEMP/withdraw.log" || echo 'nothing to withdraw'
+            echo '```'
+            if [[ $DRY_RUN != true && -s $RUNNER_TEMP/withdrawn.txt ]]; then
+              echo
+              echo '| Codename | Snapshots |'
+              echo '| --- | --- |'
+              # shellcheck disable=SC2016 # literal Markdown backticks
+              sed 's/^\([^ ]*\) \(.*\)$/| \1 | `\2` |/' "$RUNNER_TEMP/withdrawn.txt"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
 
+      # A dry run publishes nothing, so nothing is purged.
       - name: Purge CDN cache
+        if: ${{ !inputs.dry_run }}
         env:
           CLOUDFLARE_ZONE: ${{ secrets.CLOUDFLARE_ZONE }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
