@@ -1,9 +1,9 @@
 # Withdraw one package version, or a batch of them, from a codename, leaving
 # everything else published. A batch is a file in withdrawals/ with one
 # "NAME VERSION [ARCH]" request row per line; its rows are withdrawn in one
-# publication, all or nothing. The files stay in the pool; republishing the
-# release restores them. Run it with dry_run first: it prints the plan from
-# the published index and changes nothing.
+# publication, all or nothing, and from 1 component. The files stay in the
+# pool; republishing the release restores them. Run it with dry_run first: it
+# prints the plan from the published index and changes nothing.
 name: withdraw
 
 on:
@@ -23,7 +23,7 @@ on:
         description: Only this architecture (empty withdraws every architecture)
         required: false
       batch:
-        description: A file name in withdrawals/ (instead of package, version and arch)
+        description: A file name in withdrawals/ (instead of package, version and arch); 1 component
         required: false
       dry_run:
         description: Print the plan from the public index and change nothing
@@ -78,13 +78,13 @@ jobs:
         run: |
           # The plan goes to stderr and the published snapshots to stdout.
           # pipefail (defaults above) makes a failed withdrawal fail the step.
+          # Every input that is filled in reaches the script, because the
+          # script refuses a mix of a batch and a package (usage).
           args=(--codename "$CODENAME")
-          if [[ -n $BATCH ]]; then
-            args+=(--batch "$BATCH")
-          else
-            args+=(--package "$PACKAGE" --version "$VERSION")
-            if [[ -n $ARCH ]]; then args+=(--arch "$ARCH"); fi
-          fi
+          if [[ -n $BATCH ]]; then args+=(--batch "$BATCH"); fi
+          if [[ -n $PACKAGE ]]; then args+=(--package "$PACKAGE"); fi
+          if [[ -n $VERSION ]]; then args+=(--version "$VERSION"); fi
+          if [[ -n $ARCH ]]; then args+=(--arch "$ARCH"); fi
           if [[ $DRY_RUN == true ]]; then args+=(--dry-run); fi
           scripts/withdraw.sh "${args[@]}" 2>&1 >"$RUNNER_TEMP/withdrawn.txt" | tee "$RUNNER_TEMP/withdraw.log"
           {

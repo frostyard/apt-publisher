@@ -12,6 +12,12 @@
 # changes: the whole batch is withdrawn, or nothing is. The single mode is a
 # batch of one request row, so both modes share one code path.
 #
+# A batch withdraws from one component only. commit_publications saves every
+# changed working repository before it publishes; when the publication then
+# fails, reconciliation drops the pending markers, and a later run that
+# publishes one component would make only half of the batch visible. So a
+# batch that resolves to more than one component is refused, and it is split.
+#
 # --dry-run resolves the plan from the published suite alone: it reads and
 # verifies dists/CODENAME/InRelease under $APT_PUBLIC_URL, so it needs no
 # credentials, no aptly and no state, and it changes nothing. A live run
@@ -151,7 +157,20 @@ public_component_set() {
 if ((dry_run)); then
 	require curl gpgv
 	public_suite "$codename"
+	# The components the verified Release lists are the published ones. A
+	# configured component it does not list is empty: the next publication
+	# adds it, so a row that belongs to it has nothing to withdraw yet. A
+	# component it lists that the configuration dropped is drift, and a plan
+	# must not be built on it.
+	published=$(release_components "$public_release")
+	configured=$(component_set "$(codename_components "$codename")")
+	for c in ${published//,/ }; do
+		in_csv "$c" "$configured" ||
+			die "$codename publishes component $c, but the configuration says $configured (core ADR-0059). Removing a component is a separate migration; nothing was changed"
+	done
 	for c in "${components[@]}"; do
+		sets[$c]=''
+		in_csv "$c" "$published" || continue
 		sets[$c]=$(public_component_set "$codename" "$c")
 	done
 else
@@ -161,6 +180,15 @@ else
 		sets[$c]=$(repo_set "$(ensure_repo "$codename" "$c")")
 	done
 fi
+
+# join_and prints its arguments as "a and b", for a refusal that names them.
+join_and() {
+	local out='' word
+	for word in "$@"; do
+		if [[ -z $out ]]; then out=$word; else out+=" and $word"; fi
+	done
+	printf '%s\n' "$out"
+}
 
 # --- the plan: resolve every request before anything changes --------------------
 #
@@ -173,29 +201,37 @@ for request in "${requests[@]}"; do
 	IFS=$'\t' read -r qname qversion qarch <<<"$request"
 	query="$qname (= $qversion)"
 	[[ -z $qarch ]] || query+=" {$qarch}"
-	found=()
+	# The one-component rule (core ADR-0059) is about names, not versions: a
+	# name that two components hold must be repaired before anything is
+	# withdrawn, whatever version or architecture a row names.
+	holding=() matched=0
 	for c in "${components[@]}"; do
+		holds=0
 		while read -r sname sversion sarch; do
 			[[ -n $sname ]] || continue
-			[[ $sname == "$qname" && $sversion == "$qversion" ]] || continue
+			[[ $sname == "$qname" ]] || continue
+			holds=1
+			[[ $sversion == "$qversion" ]] || continue
 			[[ -z $qarch || $sarch == "$qarch" ]] || continue
 			plan[$c]="${plan[$c]:-}$sname $sversion $sarch"$'\n'
-			if ((${#found[@]} == 0)) || [[ ${found[${#found[@]} - 1]} != "$c" ]]; then
-				found+=("$c")
-			fi
+			matched=$((matched + 1))
 		done <<<"${sets[$c]}"
+		if ((holds)); then
+			holding+=("$c")
+		fi
 	done
-	if ((${#found[@]} == 0)); then
+	if ((${#holding[@]} > 1)); then
+		die "$codename lists $qname in more than one component (${holding[*]}); one package name belongs in one component, so repair that first"
+	fi
+	# The name is known, but this version is not: say so, with the old words.
+	if ((matched == 0)); then
 		# A main-only codename keeps the message it had before components.
 		if [[ $(codename_components "$codename") == main ]]; then
 			die "$(repo_name "$codename" main) has no $query"
 		fi
 		die "$codename has no $query in any component"
 	fi
-	if ((${#found[@]} > 1)); then
-		die "$codename lists $query in more than one component (${found[*]}); one package name belongs in one component, so repair that first"
-	fi
-	queries[${found[0]}]="${queries[${found[0]}]:-}$query"$'\n'
+	queries[${holding[0]}]="${queries[${holding[0]}]:-}$query"$'\n'
 done
 
 # Components in configured order, then the component's packages sorted, so
@@ -206,6 +242,13 @@ for c in "${components[@]}"; do
 		changed+=("$c")
 	fi
 done
+# A batch withdraws from one component (see the header): the working
+# repositories of two changed components are saved before the publication,
+# so a failed publication could later become visible in one component only.
+# Split the batch.
+if ((${#changed[@]} > 1)); then
+	die "$batch withdraws from components $(join_and "${changed[@]}"); a batch withdraws from 1 component, so split it"
+fi
 for c in "${changed[@]}"; do
 	plan[$c]=$(printf '%s' "${plan[$c]}" | LC_ALL=C sort -u)
 	while read -r sname sversion sarch; do

@@ -1569,6 +1569,14 @@ for deb in "$tmp/awd-a" "$tmp/awd-b"; do
 			"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$deb" --codenames trixie
 	done
 done
+# The dry run reads the components from the published Release: image is
+# configured but not published here, so its set is empty and the plan is the
+# main row.
+must_pass "a dry run before a component is published" \
+	env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/withdraw.sh" \
+	--codename trixie --package frostyard-updex --version 1.0 --dry-run
+check "the dry run plans the main row only" \
+	test "$(grep '^withdraw ' "$tmp/err")" = 'withdraw trixie main frostyard-updex 1.0 amd64'
 must_pass "a withdrawal adds image to trixie" \
 	run withdraw.sh --codename trixie --package frostyard-updex --version 1.0
 check "the withdrawal prints one line" test "$(wc -l <"$tmp/out")" = 1
@@ -1578,9 +1586,10 @@ check "main keeps the other version" listed_in trixie main frostyard-updex 1.1
 check "image is empty" test "$(cat "$pub"/dists/trixie/image/binary-*/Packages | wc -c)" = 0
 must_pass "the withdrawal's suite verifies" run verify.sh trixie --deep
 
-# A batch withdrawal withdraws many versions from one codename in one
-# publication, all or nothing, and --dry-run resolves the plan from the
-# published index alone, so it needs no credentials and changes nothing.
+# A batch withdrawal withdraws many versions of one component from one
+# codename in one publication, all or nothing, and --dry-run resolves the
+# plan from the published index alone, so it needs no credentials and changes
+# nothing.
 scope batchwithdraw
 export APT_CODENAMES_FILE=$tmp/codenames-image.tsv APT_PRODUCERS_FILE=$tmp/producers-image.tsv
 export APT_WITHDRAWALS_DIR=$tmp/withdrawals
@@ -1603,21 +1612,20 @@ for d in bw-img-10 bw-img-20; do
 done
 
 cat >"$APT_WITHDRAWALS_DIR/b1.txt" <<'EOF'
-# keep frostyard-updex 1.2, trixie-thing 1.0 and imgpkg 2.0
+# keep frostyard-updex 1.2, trixie-thing 1.0 and imgpkg 1.0 and 2.0
 
 frostyard-updex 1.0 amd64
 frostyard-updex 1.1
-imgpkg 1.0 amd64
 EOF
 trixie_before=$(inrelease trixie)
 forky_before=$(inrelease forky)
+image_sum=$(index_sum trixie image)
 
 # A dry run needs neither credentials nor aptly state.
 plan=$(printf '%s\n' \
 	'withdraw trixie main frostyard-updex 1.0 amd64' \
 	'withdraw trixie main frostyard-updex 1.1 amd64' \
-	'withdraw trixie main frostyard-updex 1.1 arm64' \
-	'withdraw trixie image imgpkg 1.0 amd64')
+	'withdraw trixie main frostyard-updex 1.1 arm64')
 must_pass "a batch dry run needs no credentials" \
 	env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/withdraw.sh" \
 	--codename trixie --batch b1.txt --dry-run
@@ -1627,21 +1635,18 @@ check "the batch dry run left InRelease unchanged" test "$(inrelease trixie)" = 
 
 must_pass "a batch withdrawal publishes one Release" run withdraw.sh --codename trixie --batch b1.txt
 check "the batch withdrawal prints one line" test "$(wc -l <"$tmp/out")" = 1
-check "the line names the codename and the snapshots of both components" test "$(wc -w <"$tmp/out")" = 3
+check "the line names the codename and one snapshot" test "$(wc -w <"$tmp/out")" = 2
 check "the line starts with the codename" test "$(cut -d' ' -f1 "$tmp/out")" = trixie
 check "the main snapshot is named for the batch" \
 	matches "^trixie-$snapshot_re-withdraw-b1\$" "$(cut -d' ' -f2 "$tmp/out")"
-check "the image snapshot is named for the batch" \
-	matches "^trixie-image-$snapshot_re-withdraw-b1\$" "$(cut -d' ' -f3 "$tmp/out")"
 check "main no longer lists 1.0" not_listed_in trixie main frostyard-updex 1.0 amd64
 check "main no longer lists 1.1 in either architecture" not_listed_in trixie main frostyard-updex 1.1
-check "image no longer lists imgpkg 1.0" not_listed_in trixie image imgpkg 1.0 amd64
 check "main keeps the version no row named" listed_in trixie main frostyard-updex 1.2 amd64
 check "main keeps another producer's package" listed_in trixie main trixie-thing 1.0 amd64
-check "image keeps its other version" listed_in trixie image imgpkg 2.0 amd64
+check "a main batch leaves the image indexes byte-identical" test "$(index_sum trixie image)" = "$image_sum"
+check "the image component keeps its version" listed_in trixie image imgpkg 1.0 amd64
 check "the batch deletes no pool file of a withdrawn version" test -n "$(pool_file 'frostyard-updex_1.0_amd64.deb')"
 check "the batch deletes no pool file of the withdrawn architecture" test -n "$(pool_file 'frostyard-updex_1.1_arm64.deb')"
-check "the batch deletes no image pool file" test -n "$(pool_file 'imgpkg_1.0_amd64.deb')"
 must_pass "the withdrawn suite passes the deep check" run verify.sh trixie --deep
 check "the batch left forky unchanged" test "$(inrelease forky)" = "$forky_before"
 
@@ -1651,7 +1656,35 @@ must_fail "a batch whose versions are gone is refused" "has no" \
 	run withdraw.sh --codename trixie --batch b1.txt
 check "the refused batch left InRelease unchanged" test "$(inrelease trixie)" = "$before"
 
+# A batch withdraws from 1 component: two changed components are saved
+# together but published one at a time, so a failure between the two would
+# leave half of the batch behind.
+printf 'frostyard-updex 1.2 amd64\nimgpkg 1.0 amd64\n' >"$APT_WITHDRAWALS_DIR/mixed.txt"
+must_fail "a batch that resolves to two components is refused" \
+	"withdraws from components main and image; a batch withdraws from 1 component" \
+	run withdraw.sh --codename trixie --batch mixed.txt
+check "the refused mixed batch withdrew nothing" listed_in trixie main frostyard-updex 1.2 amd64
+check "the refused mixed batch left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_fail "a dry run refuses a batch of two components too" "a batch withdraws from 1 component" \
+	env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/withdraw.sh" \
+	--codename trixie --batch mixed.txt --dry-run
+check "the dry run refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+
+# The same row on its own withdraws from image.
+printf 'imgpkg 1.0 amd64\n' >"$APT_WITHDRAWALS_DIR/img.txt"
+main_sum=$(index_sum trixie main)
+must_pass "an image-only batch withdraws" run withdraw.sh --codename trixie --batch img.txt
+check "the image batch prints one snapshot" test "$(wc -w <"$tmp/out")" = 2
+check "the image snapshot is named for the batch" \
+	matches "^trixie-image-$snapshot_re-withdraw-img\$" "$(cut -d' ' -f2 "$tmp/out")"
+check "image no longer lists imgpkg 1.0" not_listed_in trixie image imgpkg 1.0 amd64
+check "image keeps the version no row named" listed_in trixie image imgpkg 2.0 amd64
+check "an image batch leaves the main indexes byte-identical" test "$(index_sum trixie main)" = "$main_sum"
+check "the image batch deletes no pool file" test -n "$(pool_file 'imgpkg_1.0_amd64.deb')"
+must_pass "the image batch's suite passes the deep check" run verify.sh trixie --deep
+
 # One unresolvable row refuses the whole batch, live and in a dry run.
+before=$(inrelease trixie)
 printf 'frostyard-updex 1.2 amd64\nfrostyard-updex 9.9 amd64\n' >"$APT_WITHDRAWALS_DIR/b2.txt"
 must_fail "a batch with one unresolvable row is refused" "has no" \
 	run withdraw.sh --codename trixie --batch b2.txt
@@ -1691,6 +1724,70 @@ check "the single dry run names the row" grep -qx 'withdraw trixie main frostyar
 check "the single dry run prints nothing on stdout" test -z "$(cat "$tmp/out")"
 check "the single dry run left InRelease unchanged" test "$(inrelease trixie)" = "$before"
 
+# --- a name in two components (core ADR-0059) ----------------------------------
+#
+# The one-component rule is about names, not versions: a name that two
+# components hold refuses any withdrawal of it, whatever row names it.
+# publish.sh refuses to make that state, so each mode builds it its own way.
+
+# fake_suite DIR CODENAME "NAME VERSION ARCH"... writes and signs a public
+# suite whose every component lists the rows: only a fabricated index can
+# show a published name in two components.
+fake_suite() {
+	local dir=$1 codename=$2 row name version arch c arch_file sha size
+	shift 2
+	for c in main image; do
+		for arch in amd64 arm64 all; do
+			arch_file=$dir/dists/$codename/$c/binary-$arch/Packages
+			mkdir -p "${arch_file%/*}"
+			: >"$arch_file"
+		done
+		for row in "$@"; do
+			read -r name version arch <<<"$row"
+			arch_file=$dir/dists/$codename/$c/binary-$arch/Packages
+			{
+				printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$name" "$version" "$arch"
+				printf 'Filename: pool/%s/%s/%s_%s_%s.deb\n' "$c" "${name:0:1}" "$name" "$version" "$arch"
+				printf 'Size: 1\nSHA256: %064d\nMD5sum: %032d\n\n' 0 0
+			} >>"$arch_file"
+		done
+	done
+	{
+		printf 'Origin: test\nLabel: test\nSuite: %s\nCodename: %s\n' "$codename" "$codename"
+		printf 'Architectures: all amd64 arm64\nComponents: image main\nSHA256:\n'
+		for c in main image; do
+			for arch in amd64 arm64 all; do
+				arch_file=dists/$codename/$c/binary-$arch/Packages
+				sha=$(sha256sum <"$dir/$arch_file" | cut -d' ' -f1)
+				size=$(stat -c %s "$dir/$arch_file")
+				printf ' %s %s %s/binary-%s/Packages\n' "$sha" "$size" "$c" "$arch"
+			done
+		done
+	} >"$dir/dists/$codename/Release"
+	gpg -q --batch --yes --local-user "${fprs[0]}" --clearsign \
+		-o "$dir/dists/$codename/InRelease" "$dir/dists/$codename/Release"
+}
+
+fake_suite "$tmp/two-component-pub" trixie 'imgpkg 1.0 amd64'
+must_fail "a dry run refuses a name that two components hold" "imgpkg in more than one component" \
+	env APT_PUBLIC_URL="file://$tmp/two-component-pub" "$ROOT/scripts/withdraw.sh" \
+	--codename trixie --package imgpkg --version 1.0 --dry-run
+
+# The live mode reads the working repositories, where the state is built
+# with aptly directly, as a state repaired by hand would be.
+scope namecomp
+mkdeb "$tmp/nc-img" imgpkg 1.0 amd64
+must_pass "publish imgpkg 1.0 to image before the two-component state" \
+	run publish.sh --producer frostyard/image-only --debs "$tmp/nc-img" --codenames trixie
+mkdeb "$tmp/nc-main" imgpkg 9.9 amd64
+# shellcheck disable=SC2016 # the script runs in the child shell
+check "the same name is put into the main working repository" \
+	env APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" bash -c '. "$1/scripts/lib.sh"; aptly_init >/dev/null 2>&1
+		aptly_ repo add "$(repo_name trixie main)" "$2" >/dev/null 2>&1; state_save >/dev/null 2>&1' \
+	_ "$ROOT" "$tmp/nc-main/imgpkg_9.9_amd64.deb"
+must_fail "a live withdrawal refuses a name that two components hold" "imgpkg in more than one component" \
+	run withdraw.sh --codename trixie --package imgpkg --version 1.0
+check "the refusal withdrew nothing" listed_in trixie image imgpkg 1.0 amd64
 unset APT_WITHDRAWALS_DIR
 
 # A rollback adds the component too, and then needs one snapshot per component.
