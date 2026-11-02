@@ -146,13 +146,17 @@ scope debian
 run() { APTLY_ROOT=$(mktemp -d "$tmp/runner.XXXXXX") "$ROOT/scripts/$1" "${@:2}"; }
 
 # mkdeb DIR NAME VERSION ARCH [CONTENT] builds DIR/NAME_VERSION_ARCH.deb, with
-# the epoch left out of the file name as Debian does.
+# the epoch left out of the file name as Debian does. MKDEB_CONTROL adds one
+# control line (for example a Provides: line).
 mkdeb() {
 	local dir=$1 name=$2 version=$3 arch=$4 src
 	src=$(mktemp -d "$tmp/build.XXXXXX")
 	mkdir -p "$src/DEBIAN" "$src/usr/share/doc/$name" "$dir"
 	printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: test <test@invalid>\nDescription: test package\n' \
 		"$name" "$version" "$arch" >"$src/DEBIAN/control"
+	if [[ -n ${MKDEB_CONTROL:-} ]]; then
+		printf '%s\n' "$MKDEB_CONTROL" >>"$src/DEBIAN/control"
+	fi
 	printf '%s\n' "${5:-$name $version $arch}" >"$src/usr/share/doc/$name/content"
 	dpkg-deb --root-owner-group -b "$src" "$dir/${name}_${version#*:}_${arch}.deb" >/dev/null
 }
@@ -2126,6 +2130,7 @@ cat >"$tmp/producers-retain.tsv" <<'EOF'
 frostyard/trixie-only	trixie-thing	trixie	no	-	main
 frostyard/dasher	dasher-*	trixie	no	-	main	-
 frostyard/keeper	keeper-*	trixie	no	-	main	2
+frostyard/provider	provider-*	trixie	no	-	main	-
 EOF
 # The same rows with keeper on - (no limit), for the three versions that a
 # later run with keep 2 prunes, and one row with a keep value to refuse.
@@ -2136,6 +2141,9 @@ frostyard/keeper	keeper-*	trixie	no	-	main	-
 EOF
 cat >"$tmp/producers-retain-bad.tsv" <<'EOF'
 frostyard/keeper	keeper-*	trixie	no	-	main	0
+EOF
+cat >"$tmp/producers-retain-big.tsv" <<'EOF'
+frostyard/keeper	keeper-*	trixie	no	-	main	18446744073709551617
 EOF
 
 # keep_publish DESC PRODUCER DIR publishes DIR to trixie and writes the
@@ -2168,7 +2176,12 @@ mkdeb "$tmp/rt1" keeper-tilde 2.0 amd64
 mkdeb "$tmp/rt1" keeper-epoch 1.5 amd64
 mkdeb "$tmp/rt1" keeper-arch 1.0 amd64
 mkdeb "$tmp/rt1" keeper-arch 1.0 arm64
+# An Architecture: all build with the version that amd64 prunes later.
+mkdeb "$tmp/rt1" keeper-main 1.9 all
 keep_publish "a first keeper release" frostyard/keeper "$tmp/rt1"
+# Another producer's package that provides the version amd64 prunes later.
+MKDEB_CONTROL='Provides: keeper-main (= 1.9)' mkdeb "$tmp/rt-prov" provider-x 5.0 amd64
+keep_publish "a package that provides a keeper version" frostyard/provider "$tmp/rt-prov"
 check "the first keeper release is listed" listed trixie keeper-main 1.9
 check "a first release writes an empty report" test -f "$tmp/pruned.tsv" -a ! -s "$tmp/pruned.tsv"
 mkdeb "$tmp/rt2" keeper-main 1.10 amd64
@@ -2188,7 +2201,9 @@ mkdeb "$tmp/rt3" keeper-arch 3.0 amd64
 keep_publish "a third keeper release" frostyard/keeper "$tmp/rt3"
 check "the newest version is listed" listed trixie keeper-main 6.2.0-frostyard20261102153446
 check "the second newest version is listed" listed trixie keeper-main 1.10
-check "the oldest version left the index" not_listed trixie keeper-main 1.9
+check "the oldest version left the index" not_listed trixie keeper-main 1.9 amd64
+check "the all build of that version stays" listed trixie keeper-main 1.9 all
+check "a package that provides the pruned version stays" listed trixie provider-x 5.0
 check "the pruned version's pool file stays" test -n "$(pool_file keeper-main_1.9_amd64.deb)"
 check "a newer release is listed above its ~ prerelease" listed trixie keeper-tilde 2.1
 check "the ~ prerelease left the index" not_listed trixie keeper-tilde 2.0~rc1
@@ -2258,6 +2273,9 @@ must_fail "an invalid keep value is refused" "has keep '0' in config/producers.t
 	env APT_PRODUCERS_FILE="$tmp/producers-retain-bad.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/keeper --debs "$tmp/rt3" --codenames trixie
 check "the invalid keep refusal left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_fail "a keep value above 999 is refused" "give an integer from 1 to 999" \
+	env APT_PRODUCERS_FILE="$tmp/producers-retain-big.tsv" APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/keeper --debs "$tmp/rt3" --codenames trixie
 
 # The secrets check reads no codename list, as in the section before this one.
 unset APT_CODENAMES_FILE

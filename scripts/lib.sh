@@ -376,7 +376,8 @@ repo_set() {
 # A producer may keep only the newest N versions of each of its packages
 # (column 7 of config/producers.tsv). A publication applies the rule in the
 # same publication: the older versions leave the index. No pool file is
-# deleted, so a pruned version comes back only through a rollback.
+# deleted: a pruned version comes back through a rollback to a snapshot that
+# lists it, or through a republication while it is within the newest N.
 
 # version_sort_desc VERSION... prints the versions, newest first. It uses
 # dpkg's ordering, not sort -V: sort -V reads an epoch or a ~ wrongly, and

@@ -28,7 +28,9 @@
 # The publication that adds newer ones withdraws the rest from the index in
 # the same publication: they leave the working repository before the
 # snapshot, so no pool file is deleted. A publication whose own packages
-# would be withdrawn at once is refused before any state changes.
+# would be withdrawn at once is refused before any state changes. A pruned
+# version comes back through a rollback to a snapshot that lists it, or
+# through a republication while it is within the newest N.
 
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -69,11 +71,12 @@ require dpkg dpkg-deb
 patterns=$(producer_field "$producer" 2) || die "$producer is not a registered producer"
 allowed=$(producer_field "$producer" 3)
 component=$(producer_field "$producer" 6)
-# Column 7 is empty for a six-column row: no limit.
+# A row without column 7 (test fixtures) reads as -: no limit. The bound
+# keeps the count far from bash's integer limits.
 keep=$(producer_field "$producer" 7)
 if [[ -n $keep && $keep != - ]]; then
-	[[ $keep =~ ^[1-9][0-9]*$ ]] ||
-		die "producer $producer has keep '$keep' in config/producers.tsv: give a positive integer or - for no limit"
+	[[ $keep =~ ^[1-9][0-9]{0,2}$ ]] ||
+		die "producer $producer has keep '$keep' in config/producers.tsv: give an integer from 1 to 999, or - for no limit"
 fi
 codenames=${codenames:-${allowed//,/ }}
 label=${label:-${producer#*/}}
@@ -174,16 +177,28 @@ for codename in $codenames; do
 		pruned_pairs=()
 		prune=$(retention_rows "$repo" "$keep" "$patterns") ||
 			die "cannot apply retention to $repo"
+		before_prune=$(repo_set "$repo")
 		while read -r name version arch; do
 			[[ -n $name ]] || continue
 			if grep -qxF -- "$name $version $arch" <<<"${releases[$codename]:-}"; then
 				die "$name $version $arch is older than the newest $keep published versions; retention would withdraw it at once"
 			fi
 			log "prune $codename $component $name $version $arch"
-			aptly_ repo remove "$repo" "$name (= $version) {$arch}" >&2
+			# The package key NAME_VERSION_ARCH matches that one package. A
+			# dependency query (NAME (= VERSION) {ARCH}) would also match
+			# packages that provide NAME, Architecture: all packages, and
+			# other spellings of an equal version.
+			aptly_ repo remove "$repo" "${name}_${version}_${arch}" >&2
 			pruned_pairs+=("$name=$version")
 			pruned_rows+=("$codename"$'\t'"$name"$'\t'"$version"$'\t'"$arch"$'\t'"$component")
 		done <<<"$prune"
+		# The repository must now hold exactly what it held before, less
+		# the planned rows: anything else is refused before the commit.
+		want=$(LC_ALL=C comm -23 <(printf '%s\n' "$before_prune") \
+			<(printf '%s\n' "$prune" | sed '/^$/d' | LC_ALL=C sort -u) | sed '/^$/d')
+		got=$(repo_set "$repo")
+		[[ $got == "$want" ]] ||
+			die "retention changed $repo beyond its plan; nothing was published"
 		if ((${#pruned_pairs[@]})); then
 			# Read back from the repository: a version that another
 			# architecture keeps stays listed.

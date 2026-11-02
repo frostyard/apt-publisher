@@ -14,13 +14,14 @@
 #             the same name, or depend on such a build. Changing a producer's
 #             component needs the move workflow (move.yml) right after the
 #             merge: until it runs, the producer's publications fail closed.
-# keep        retention: a positive integer N keeps only the newest N versions
-#             of each of the producer's packages, and the publication that
-#             adds newer ones withdraws the rest from the index in the same
-#             run (core ADR-0067). - means no limit. A publication that would
-#             withdraw one of its own packages at once is refused. Pool files
-#             stay, so a pruned version comes back only through a rollback.
-#             An empty column means -.
+# keep        retention: an integer N from 1 to 999 keeps only the newest N
+#             versions of each of the producer's packages (per architecture),
+#             and the publication that adds newer ones withdraws the rest from
+#             the index in the same run (core ADR-0067). - means no limit. A
+#             publication that would withdraw one of its own packages at once
+#             is refused. Pool files stay: a pruned version comes back through
+#             a rollback, or a republication while it is within the newest N.
+#             Every row here has 7 columns (tests/check-config.sh).
 #
 # Add a producer only after confirming the package names it ships.
 frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main	-

@@ -148,10 +148,11 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
 - **Registration:** add the producer to `config/producers.tsv`. Producers
   that don't attest yet use `attested=no` until they add
   `actions/attest-build-provenance`.
-- **Retention:** column 7, `keep`, is a positive integer N, or `-` for no
-  limit (core ADR-0067). With N, a publication withdraws every version older
-  than the newest N of each of the producer's packages, counted per
-  architecture, in the same run. An empty column means `-`.
+- **Retention:** column 7, `keep`, is an integer N from 1 to 999, or `-` for
+  no limit (core ADR-0067). With N, a publication withdraws every version
+  older than the newest N of each of the producer's packages, counted per
+  architecture, in the same run. Every row of the committed file has 7
+  columns; the scripts read a row without column 7 (a test fixture) as `-`.
 
 ## Codenames and versions
 
@@ -372,12 +373,17 @@ legacy `/public.key` stays unchanged and is not touched.
   - Versions are ordered with `dpkg --compare-versions`, so epochs and `~`
     order as apt orders them.
   - It withdraws from the index only. Pool files stay, so a pruned version
-    comes back only through a rollback to a snapshot that lists it.
+    comes back through a rollback to a snapshot that lists it, or through a
+    republication of its release while it is within the newest N (for
+    example after a withdrawal of a newer version).
+  - It removes each version by its exact package key
+    (`NAME_VERSION_ARCH`), never by a dependency query, and refuses the run
+    when the working repository then differs from the plan.
   - `--pruned FILE` lists the withdrawn versions as
     `codename name version arch component` rows; the run summary names them.
   - A publication whose own packages would be withdrawn at once, because
     they are older than the newest N, is refused before any state change.
-  - `-`, or an empty column, keeps every version.
+  - `-` keeps every version.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
   spaces. A codename that publishes only `main` takes one. Snapshots that

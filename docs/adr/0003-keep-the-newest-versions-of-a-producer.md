@@ -17,9 +17,10 @@ append-only, so old files stay available for a rollback.
 
 ## Decision
 
-**Configuration.** `config/producers.tsv` column 7, `keep`, holds a positive
-integer N, or `-` for no limit. An empty column, as in a six-column row,
-reads as `-`.
+**Configuration.** `config/producers.tsv` column 7, `keep`, holds an integer
+N from 1 to 999, or `-` for no limit. Every row of the committed file has 7
+columns; the scripts read a row without column 7, as in a test fixture, as
+`-`.
 
 **The rule.** A publication of a producer with `keep=N` withdraws every
 version older than the newest N of each of its packages, counted per package
@@ -42,9 +43,16 @@ would withdraw them at once.
 **A third removal mode.** Retention amends ADR-0001's two removal modes with
 a third, and it shares the no-deletion rule: aptly switches keep
 `-skip-cleanup`, so no pool file is deleted. Retention removes a version from
-the index only. A pruned version comes back only through a rollback to a
+the index only. A pruned version comes back through a rollback to a
 snapshot that lists it, or through a later publication that re-adds it while
 it is within the limit.
+
+**Exact removal.** Each version leaves by its package key,
+`NAME_VERSION_ARCH`. An aptly dependency query (`NAME (= VERSION) {ARCH}`)
+also matches packages that provide NAME, `Architecture: all` packages, and
+other spellings of an equal version. After the removals, the working
+repository must hold exactly its earlier packages less the planned ones, or
+the run is refused before the commit.
 
 **Report.** `publish.sh --pruned FILE` writes one
 `codename name version arch component` row per withdrawn version, and an
