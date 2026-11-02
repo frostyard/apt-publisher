@@ -1,0 +1,85 @@
+# Withdraw from trixie: every published version of the 10 Omarchy apps that
+# frostyard/omarchy-apps no longer builds (core ADR-0066; Brian, T690a,
+# 2026-11-02). 70 rows, all in trixie main amd64, taken from the published
+# index on 2026-11-02. voxtype and moonlight-qt stay. The pool files stay,
+# and the legacy stable suite is not touched (it is frozen).
+#
+# Order: run this only after frostyard/omarchy-apps#9 has published its
+# first 2-package release and apt-publisher#25 has merged. Otherwise the
+# next 12-package release, or a re-run of an older one, publishes these
+# names again.
+#
+# Run: the withdraw workflow, codename trixie, batch
+# 2026-11-02-omarchy-removed-apps.txt; dry_run true first.
+#
+# NAME VERSION ARCH
+aether 4.29.4-frostyard20260826142652 amd64
+aether 4.29.4-frostyard20260826144243 amd64
+aether 4.29.4-frostyard20261022024038 amd64
+aether 4.29.4-frostyard20261023154308 amd64
+aether 4.29.4-frostyard20261025180641 amd64
+aether 4.29.4-frostyard20261027004353 amd64
+aether 4.32.0-frostyard20261029021858 amd64
+cliamp 1.63.2-frostyard20260826142536 amd64
+cliamp 1.63.2-frostyard20260826144123 amd64
+cliamp 1.63.2-frostyard20261022023129 amd64
+cliamp 1.63.2-frostyard20261023154140 amd64
+cliamp 1.63.2-frostyard20261025180530 amd64
+cliamp 1.63.2-frostyard20261027004234 amd64
+cliamp 2.3.0-frostyard20261029021719 amd64
+gpu-screen-recorder 6.0.1-frostyard20260826142514 amd64
+gpu-screen-recorder 6.0.1-frostyard20260826144102 amd64
+gpu-screen-recorder 6.0.1-frostyard20261022023126 amd64
+gpu-screen-recorder 6.0.1-frostyard20261023154121 amd64
+gpu-screen-recorder 6.0.1-frostyard20261025180505 amd64
+gpu-screen-recorder 6.0.1-frostyard20261027004234 amd64
+gpu-screen-recorder 6.1.5-frostyard20261029021657 amd64
+herdr 0.8.0-frostyard20260826142909 amd64
+herdr 0.8.0-frostyard20260826144453 amd64
+herdr 0.8.0-frostyard20261022023513 amd64
+herdr 0.8.0-frostyard20261023154533 amd64
+herdr 0.8.0-frostyard20261025180904 amd64
+herdr 0.8.0-frostyard20261027004636 amd64
+herdr 0.8.0-frostyard20261029022116 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20260826142736 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20260826144326 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20261022023351 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20261023154252 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20261025180733 amd64
+hyprland-preview-share-picker 0.2.1-frostyard20261027004427 amd64
+hyprland-preview-share-picker 0.3.0-frostyard20261029021931 amd64
+omacalc 0.2.2-frostyard20260826142459 amd64
+omacalc 0.2.2-frostyard20260826144100 amd64
+omacalc 0.2.2-frostyard20261022023111 amd64
+omacalc 0.2.2-frostyard20261023154100 amd64
+omacalc 0.2.2-frostyard20261025180530 amd64
+omacalc 0.2.2-frostyard20261027004219 amd64
+omacalc 0.3.1-frostyard20261029021636 amd64
+omacut 0.4.0-frostyard20260826142517 amd64
+omacut 0.4.0-frostyard20260826144101 amd64
+omacut 0.4.0-frostyard20261022023115 amd64
+omacut 0.4.0-frostyard20261023154109 amd64
+omacut 0.4.0-frostyard20261025180507 amd64
+omacut 0.4.0-frostyard20261027004228 amd64
+omacut 0.7.2-frostyard20261029021651 amd64
+omawrite 0.5.0-frostyard20260826142504 amd64
+omawrite 0.5.0-frostyard20260826144053 amd64
+omawrite 0.5.0-frostyard20261022023116 amd64
+omawrite 0.5.0-frostyard20261023154109 amd64
+omawrite 0.5.0-frostyard20261025180501 amd64
+omawrite 0.5.0-frostyard20261027004219 amd64
+omawrite 0.7.2-frostyard20261029021635 amd64
+tensaku 0.28.0-frostyard20260826142743 amd64
+tensaku 0.28.0-frostyard20260826144348 amd64
+tensaku 0.28.0-frostyard20261022023403 amd64
+tensaku 0.28.0-frostyard20261023154356 amd64
+tensaku 0.28.0-frostyard20261025180652 amd64
+tensaku 0.28.0-frostyard20261027004507 amd64
+tensaku 0.29.0-frostyard20261029021920 amd64
+ttfx 0.3.2-frostyard20260826142536 amd64
+ttfx 0.3.2-frostyard20260826144119 amd64
+ttfx 0.3.2-frostyard20261022023138 amd64
+ttfx 0.3.2-frostyard20261023154140 amd64
+ttfx 0.3.2-frostyard20261025180523 amd64
+ttfx 0.3.2-frostyard20261027004228 amd64
+ttfx 0.5.1-frostyard20261029021720 amd64

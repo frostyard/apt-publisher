@@ -384,6 +384,20 @@ legacy `/public.key` stays unchanged and is not touched.
   - A publication whose own packages would be withdrawn at once, because
     they are older than the newest N, is refused before any state change.
   - `-` keeps every version.
+- **Withdraw a batch:** commit a file in `withdrawals/` with one
+  `NAME VERSION [ARCH]` request row per line (a `#` line is a comment), then
+  run **withdraw** with that codename and the file name as `batch`.
+  - It resolves every row against the published codename first: a row that
+    matches nothing, or a name that two components hold, refuses the whole
+    batch, so either every row is withdrawn or nothing is.
+  - A batch withdraws from 1 component: its rows leave that component's
+    working repository with one aptly call, and that component is published
+    in one signed Release. A batch that resolves to two components is
+    refused, so split it per component. The single mode is the same with one
+    row.
+  - Set `dry_run` to print the plan from the published index alone; it needs
+    no credentials and changes nothing. Use it first.
+  - The files stay in the pool, as for one version.
 - **Point-in-time rollback:** run **rollback** with a codename and earlier
   snapshots, one for each component the codename publishes, separated by
   spaces. A codename that publishes only `main` takes one. Snapshots that
