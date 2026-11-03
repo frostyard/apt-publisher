@@ -346,7 +346,8 @@ it doesn't carry.
   - Check *which workflow* signed an attestation, with `--signer-workflow`
     or a tag pattern, not only `--source-ref refs/tags/<tag>`.
     firn's and updex's release workflows run on any tag, and their tag
-    rulesets protect only `v*`.
+    rulesets protect only `v*`. **Done in ADR-0004:** column 4 names a
+    workflow and a tag pattern or branch.
 - **Phase 7, audit.** All eight producers publish through apt-publisher, and
   a manual audit run passed on 2026-10-25. Set the repository variable:
   `gh variable set APT_AUDIT_ENABLED --repo frostyard/apt-publisher --body true`.

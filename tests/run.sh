@@ -99,7 +99,7 @@ gpg --export "${fprs[0]}" >"$tmp/test-key.gpg"
 gpg --export "${fprs[1]}" >"$tmp/other-key.gpg"
 
 cat >"$tmp/producers.tsv" <<'EOF'
-frostyard/updex	frostyard-updex	trixie,forky	yes	frostyard/snosi	main
+frostyard/updex	frostyard-updex	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main
 frostyard/bootc-debian	bootc,libostree-*	trixie,forky	no	-	main
 frostyard/trixie-only	trixie-thing	trixie	no	-	main
 frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	main
@@ -2499,6 +2499,119 @@ must_fail "a keep value above 999 is refused" "give an integer from 1 to 999" \
 # The secrets check reads no codename list, as in the section before this one.
 unset APT_CODENAMES_FILE
 export APT_PRODUCERS_FILE=$tmp/producers.tsv
+
+# --- build provenance (ADR-0004) -----------------------------------------------
+
+# gh that downloads one fake .deb and logs every call to $tmp/prov-calls;
+# `attestation verify` fails when FAKE_VERIFY_FAIL is set.
+mkdir -p "$tmp/shim-prov"
+cat >"$tmp/shim-prov/gh" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+'release download')
+	printf '%s\n' "\$*" >>"$tmp/prov-calls"
+	dir=''
+	while ((\$#)); do
+		[[ \$1 == --dir ]] && dir=\$2
+		shift
+	done
+	mkdir -p "\$dir"
+	printf 'not a real .deb\n' >"\$dir/pkg_1.0_amd64.deb"
+	;;
+'attestation verify')
+	printf '%s\n' "\$*" >>"$tmp/prov-calls"
+	if [[ -n \${FAKE_VERIFY_FAIL:-} ]]; then
+		echo 'shim: no attestation for this file' >&2
+		exit 1
+	fi
+	;;
+*) exit 2 ;;
+esac
+EOF
+chmod +x "$tmp/shim-prov/gh"
+# A producer with a tag policy, one with a branch policy, an unattested one,
+# the retired `yes`, and a value that is no valid form.
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+	frostyard/tagged pkg trixie 'release.yml@refs/tags/v*' - main - \
+	frostyard/branch pkg trixie 'build.yml@refs/heads/main' - main - \
+	frostyard/plain pkg trixie no - main - \
+	frostyard/legacy pkg trixie yes - main - \
+	frostyard/badref pkg trixie 'release.yml@refs/pull/1/merge' - main - \
+	>"$tmp/producers-prov.tsv"
+: >"$tmp/prov-calls"
+prov() {
+	env PATH="$tmp/shim-prov:$PATH" APT_PRODUCERS_FILE="$tmp/producers-prov.tsv" \
+		"$ROOT/scripts/fetch-release.sh" "$@"
+}
+
+# a. The tag pattern matches, and the attestation must come from release.yml
+# at that tag.
+prov_tag=$(mktemp -d "$tmp/prov.XXXXXX")
+: >"$tmp/prov-calls"
+must_pass "a tag policy verifies a matching release" prov frostyard/tagged v1.2.0 "$prov_tag"
+prov_want="attestation verify $prov_tag/pkg_1.0_amd64.deb --repo frostyard/tagged"
+prov_want+=" --signer-workflow frostyard/tagged/.github/workflows/release.yml"
+prov_want+=" --source-ref refs/tags/v1.2.0 --deny-self-hosted-runners"
+check "the tag policy pins the signing workflow and the tag ref" \
+	grep -qxF "$prov_want" "$tmp/prov-calls"
+check "the tag policy reports the workflow and the ref" \
+	grep -qF 'verified the provenance of 1 files: frostyard/tagged/.github/workflows/release.yml at refs/tags/v1.2.0' "$tmp/err"
+
+# b. A tag outside the pattern is refused before the download.
+: >"$tmp/prov-calls"
+must_fail "a tag outside the policy's pattern is refused" 'releases only tags that match v\*; dev does not' \
+	prov frostyard/tagged dev "$(mktemp -d "$tmp/prov.XXXXXX")"
+if grep -q '^release download' "$tmp/prov-calls"; then
+	not_ok "the refused tag downloads nothing"
+fi
+ok "the refused tag downloads nothing"
+
+# c. A branch policy accepts any release tag and pins the branch ref.
+prov_branch=$(mktemp -d "$tmp/prov.XXXXXX")
+: >"$tmp/prov-calls"
+must_pass "a branch policy verifies any release tag" \
+	prov frostyard/branch main-20261102170521-31f199e "$prov_branch"
+prov_want="attestation verify $prov_branch/pkg_1.0_amd64.deb --repo frostyard/branch"
+prov_want+=" --signer-workflow frostyard/branch/.github/workflows/build.yml"
+prov_want+=" --source-ref refs/heads/main --deny-self-hosted-runners"
+check "the branch policy pins the signing workflow and the branch ref" \
+	grep -qxF "$prov_want" "$tmp/prov-calls"
+
+# d. A failed attestation check refuses the release.
+: >"$tmp/prov-calls"
+export FAKE_VERIFY_FAIL=1
+must_fail "an attestation from the wrong workflow is refused" 'has no valid provenance' \
+	prov frostyard/tagged v1.2.0 "$(mktemp -d "$tmp/prov.XXXXXX")"
+unset FAKE_VERIFY_FAIL
+
+# e. `no` keeps trusting the assets, with a warning and no check.
+: >"$tmp/prov-calls"
+must_pass "an unattested producer's release is trusted" prov frostyard/plain v1.2.0 "$(mktemp -d "$tmp/prov.XXXXXX")"
+check "the unattested producer warns" grep -q 'is not attested' "$tmp/err"
+if grep -q '^attestation verify' "$tmp/prov-calls"; then
+	not_ok "the unattested producer runs no attestation check"
+fi
+ok "the unattested producer runs no attestation check"
+
+# f. The retired `yes` fails closed, before the download.
+: >"$tmp/prov-calls"
+must_fail "the retired attested=yes is refused" \
+	'must be no or WORKFLOW@refs/tags/PATTERN or WORKFLOW@refs/heads/BRANCH' \
+	prov frostyard/legacy v1.2.0 "$(mktemp -d "$tmp/prov.XXXXXX")"
+if grep -q '^release download' "$tmp/prov-calls"; then
+	not_ok "attested=yes downloads nothing"
+fi
+ok "attested=yes downloads nothing"
+
+# g. A ref that is no valid form fails closed, before the download.
+: >"$tmp/prov-calls"
+must_fail "a policy with an invalid ref is refused" \
+	'must be no or WORKFLOW@refs/tags/PATTERN or WORKFLOW@refs/heads/BRANCH' \
+	prov frostyard/badref v1.2.0 "$(mktemp -d "$tmp/prov.XXXXXX")"
+if grep -q '^release download' "$tmp/prov-calls"; then
+	not_ok "an invalid ref downloads nothing"
+fi
+ok "an invalid ref downloads nothing"
 
 # --- secrets check ------------------------------------------------------------
 
