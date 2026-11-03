@@ -312,8 +312,9 @@ it doesn't carry.
   - **bootc-debian was made public on 2026-10-04,** so `fetch-release.sh`
     and the audit read its releases with `github.token`. Private producers
     still need a token with Contents read, or to go public.
-    - It is registered `trixie` only and `attested=no`: it releases from
-      manual runs on `main`, so its provenance names `refs/heads/main`.
+    - It is registered `trixie` only. It releases from manual runs on
+      `main`, so its provenance names `refs/heads/main`: since ADR-0004 it
+      is attested as `build.yml@refs/heads/main`.
     - Its versions carry `~deb13`. GitHub lists release assets with `.` in
       place of `~`, and aptly keeps those names for the pool files.
   - Producers without build attestations use `attested=no` until they add
@@ -346,7 +347,8 @@ it doesn't carry.
   - Check *which workflow* signed an attestation, with `--signer-workflow`
     or a tag pattern, not only `--source-ref refs/tags/<tag>`.
     firn's and updex's release workflows run on any tag, and their tag
-    rulesets protect only `v*`.
+    rulesets protect only `v*`. **Done in ADR-0004:** column 4 names a
+    workflow and a tag pattern or branch.
 - **Phase 7, audit.** All eight producers publish through apt-publisher, and
   a manual audit run passed on 2026-10-25. Set the repository variable:
   `gh variable set APT_AUDIT_ENABLED --repo frostyard/apt-publisher --body true`.

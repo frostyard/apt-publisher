@@ -27,16 +27,19 @@ awk -F'\t' '!/^#/ && NF {
 	if (seen[$2]++) { print "codenames.tsv line " FNR ": duplicate Debian major " $2; bad = 1 }
 } END { exit bad }' "$APT_CODENAMES_FILE" >&2 || fail "codenames.tsv"
 
-# producers.tsv: 7 columns. Column 6, the component, must be published by
-# every codename the producer lists (read from codenames.tsv, the first
-# file). Column 7, keep, is an integer from 1 to 999, or - for no limit (core
-# ADR-0067). The committed file always has 7 columns; scripts read a row
-# without column 7 (a test fixture) as -.
-awk -F'\t' 'FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
+# producers.tsv: 7 columns. Column 4, attested, is no or WORKFLOW@REF, a
+# signing workflow and the ref it runs on (ADR-0004). Column 6, the
+# component, must be published by every codename the producer lists (read
+# from codenames.tsv, the first file). Column 7, keep, is an integer from 1 to
+# 999, or - for no limit (core ADR-0067). The committed file always has 7
+# columns; scripts read a row without column 7 (a test fixture) as -.
+awk -F'\t' '
+BEGIN { attested = "^(no|[A-Za-z0-9_.-]+\\.ya?ml@refs/(tags/[A-Za-z0-9_.*?-]+|heads/[A-Za-z0-9_./-]+))$" }
+FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 !/^#/ && NF {
 	if (NF != 7) { print "producers.tsv line " FNR ": expected 7 tab-separated columns: repository, packages, codenames, attested, notify, component, keep"; bad = 1; next }
 	if ($1 !~ /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/) { print "producers.tsv line " FNR ": bad repository " $1; bad = 1 }
-	if ($4 != "yes" && $4 != "no") { print "producers.tsv line " FNR ": attested must be yes or no"; bad = 1 }
+	if ($4 !~ attested) { print "producers.tsv line " FNR ": attested must be no or WORKFLOW@refs/tags/PATTERN or WORKFLOW@refs/heads/BRANCH"; bad = 1 }
 	if ($6 != "main" && $6 != "image") { print "producers.tsv line " FNR ": component must be main or image"; bad = 1; next }
 	if ($7 != "-" && $7 !~ /^[1-9][0-9]?[0-9]?$/) { print "producers.tsv line " FNR ": keep must be an integer from 1 to 999, or - for no limit"; bad = 1 }
 	n = split($3, cs, ",")

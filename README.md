@@ -28,6 +28,7 @@ producer tag ─► goreleaser ─► GitHub release (.deb + build provenance)
    publish.yml   (concurrency group "apt-repository", queue: max: one writer,
                   up to 100 queued runs)
      fetch-release.sh   download the release's .deb assets, gh attestation verify
+                        with the producer's signing workflow and ref (ADR-0004)
      publish.sh         validate ─► reconcile state with the bucket ─► aptly add
                         ─► snapshot ─► record pending + save ─► publish switch
                         ─► clear pending + save ─► read back from the bucket
@@ -144,9 +145,13 @@ Taking updex as the example, replace the "Publish to frostyard repo" and
   Producers no longer hold the GPG key or R2 credentials.
 - **Snosi trigger:** the snosi build is now dispatched by the publisher, after
   the packages are live.
-- **Provenance:** updex already attests its `.deb` files.
-- **Registration:** add the producer to `config/producers.tsv`. Producers
-  that don't attest yet use `attested=no` until they add
+- **Provenance:** column 4, `attested`, is `no`, or
+  `WORKFLOW@refs/tags/PATTERN`, or `WORKFLOW@refs/heads/BRANCH`
+  (ADR-0004). With a policy, `fetch-release.sh` verifies every `.deb` with
+  `--signer-workflow` and `--source-ref`, so both the signing workflow and
+  the ref are pinned. `yes` is no longer a value.
+- **Registration:** add the producer to `config/producers.tsv`, with a
+  policy when it attests and `no` until it adds
   `actions/attest-build-provenance`.
 - **Retention:** column 7, `keep`, is an integer N from 1 to 999, or `-` for
   no limit (core ADR-0067). With N, a publication withdraws every version

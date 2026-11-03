@@ -6,7 +6,9 @@ This repository is the single writer of Frostyard's APT metadata at
 the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision;
 [ADR-0002](docs/adr/0002-two-components-per-codename.md) records the two
 components per codename, the move, the published key and the Debian-name
-audit (core ADR-0059).
+audit (core ADR-0059), and
+[ADR-0004](docs/adr/0004-pin-the-signer-workflow-of-attested-producers.md)
+the signing workflow and ref that an attested producer names.
 
 ## Invariants
 
@@ -16,6 +18,9 @@ audit (core ADR-0059).
 - Validation runs before any state change. `publish.sh` refuses unknown
   producers, foreign package names, disallowed codenames or architectures,
   and mismatched `~debNN` markers.
+- An attested producer's column 4 names its signing workflow and ref;
+  `fetch-release.sh` passes `--signer-workflow` and `--source-ref` for every
+  `.deb`. `yes` is not a valid value (ADR-0004).
 - Nothing deletes pool files. Keep `-skip-cleanup` on every switch; deletion
   would be a separate, explicit decision.
 - `reconcile_state` must run before any change in every path that can
