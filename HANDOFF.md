@@ -312,8 +312,9 @@ it doesn't carry.
   - **bootc-debian was made public on 2026-10-04,** so `fetch-release.sh`
     and the audit read its releases with `github.token`. Private producers
     still need a token with Contents read, or to go public.
-    - It is registered `trixie` only and `attested=no`: it releases from
-      manual runs on `main`, so its provenance names `refs/heads/main`.
+    - It is registered `trixie` only. It releases from manual runs on
+      `main`, so its provenance names `refs/heads/main`: since ADR-0004 it
+      is attested as `build.yml@refs/heads/main`.
     - Its versions carry `~deb13`. GitHub lists release assets with `.` in
       place of `~`, and aptly keeps those names for the pool files.
   - Producers without build attestations use `attested=no` until they add

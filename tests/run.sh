@@ -2580,7 +2580,7 @@ check "the branch policy pins the signing workflow and the branch ref" \
 # d. A failed attestation check refuses the release.
 : >"$tmp/prov-calls"
 export FAKE_VERIFY_FAIL=1
-must_fail "an attestation from the wrong workflow is refused" 'has no valid provenance' \
+must_fail "a failed attestation verification refuses the release" 'has no valid provenance' \
 	prov frostyard/tagged v1.2.0 "$(mktemp -d "$tmp/prov.XXXXXX")"
 unset FAKE_VERIFY_FAIL
 
