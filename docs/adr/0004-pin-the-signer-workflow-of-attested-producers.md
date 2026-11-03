@@ -47,9 +47,9 @@ publications and changes no state.
 
 **Registered.** updex, intuneme, firn, chairlift and first-setup are
 `release.yml@refs/tags/v*`; bootc-debian and omarchy-apps are
-`build.yml@refs/heads/main`. incus stays `no` for now, although its releases
-attest from `builds-docker.yml` at `refs/heads/stable`: registering that
-policy is a separate decision.
+`build.yml@refs/heads/main`; incus is
+`builds-docker.yml@refs/heads/stable` (a follow-up decision, Brian, T733a).
+No producer is `no` now.
 
 ## Consequences
 

@@ -34,13 +34,13 @@
 frostyard/updex	frostyard-updex	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
 # incus versions carry -debian13-, which is not a ~debNN marker, so they
 # would route to every target: trixie only until they carry ~deb13/~deb14.
-# Its releases carry attestations from builds-docker.yml at refs/heads/stable,
-# but it stays `no` until a separate decision registers that policy
-# (ADR-0004).
+# It releases from pushes to stable: builds-docker.yml attests and creates
+# the release only on refs/heads/stable, so its policy names that branch
+# (ADR-0004; Brian, T733a).
 # image (core ADR-0059 step 5): Debian 13 ships incus, incus-base,
 # incus-client and incus-extra (trixie-security), and the 1: epoch makes these
 # builds replace them; incus-ui-canonical goes with them, one producer.
-frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	no	frostyard/snosi	image	-
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	builds-docker.yml@refs/heads/stable	frostyard/snosi	image	-
 # Static Go, attested from v* tags; the v* tag pattern and the attestation
 # both refuse the unattested nightly `dev` prerelease, whose 1.0.0.dev version
 # sorts above releases.
