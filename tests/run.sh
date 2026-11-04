@@ -2651,4 +2651,69 @@ fi
 check "the secrets check reports every failing secret" test "$(grep -c '^FAIL - ' "$tmp/out")" = 3
 check "a failing secret does not stop the other checks" grep -qx 'ok - DISPATCH_TOKEN can dispatch to frostyard/snosi' "$tmp/out"
 
+# These cases fail on the old workflow text, so the shell check cannot silently stop working.
+# Each case starts from a fresh repository copy under $tmp and edits only that copy.
+copy_workflow_config() {
+	rm -rf -- "$tmp/cfg"
+	mkdir "$tmp/cfg"
+	tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$tmp/cfg" -xf -
+}
+
+copy_workflow_config
+must_pass "workflow shell contract accepts the unchanged workflows" "$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+check "the publish defaults removal fixture exists" grep -q '^defaults:$' "$tmp/cfg/.github/workflows/publish.yml"
+check "the publish run block fixture exists" grep -q '^  run:$' "$tmp/cfg/.github/workflows/publish.yml"
+check "the publish shell fixture exists" grep -q '^    shell: bash$' "$tmp/cfg/.github/workflows/publish.yml"
+sed -i -e '/^defaults:$/d' -e '/^  run:$/{d;}' -e '/^    shell: bash$/d' "$tmp/cfg/.github/workflows/publish.yml"
+check "removing the publish defaults changed the file" test "$(grep -c '^defaults:$' "$tmp/cfg/.github/workflows/publish.yml")" = 0
+must_fail "the workflow shell contract checks publish defaults" "publish.yml must set defaults.run.shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+check "the audit defaults removal fixture exists" grep -q '^defaults:$' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit run block fixture exists" grep -q '^  run:$' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit shell fixture exists" grep -q '^    shell: bash$' "$tmp/cfg/.github/workflows/audit.yml"
+sed -i -e '/^defaults:$/d' -e '/^  run:$/{d;}' -e '/^    shell: bash$/d' "$tmp/cfg/.github/workflows/audit.yml"
+check "removing the audit defaults changed the file" test "$(grep -c '^defaults:$' "$tmp/cfg/.github/workflows/audit.yml")" = 0
+must_fail "the workflow shell contract checks audit defaults" "audit.yml must set defaults.run.shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^        id: publish$/a\        shell: bash -e {0}' "$tmp/cfg/.github/workflows/publish.yml"
+check "the publish shell override changed the file" grep -Fxq '        shell: bash -e {0}' "$tmp/cfg/.github/workflows/publish.yml"
+must_fail "the workflow shell contract rejects publish shell overrides" "publish.yml:[0-9]* sets shell: bash -e {0}; only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^      - name: Audit producers.*latest releases$/a\        shell: sh' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit shell override changed the file" grep -Fxq '        shell: sh' "$tmp/cfg/.github/workflows/audit.yml"
+must_fail "the workflow shell contract rejects audit shell overrides" "audit.yml:[0-9]* sets shell: sh; only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^      - name: Publish$/i\      - shell: sh\n        run: "true"' "$tmp/cfg/.github/workflows/publish.yml"
+check "the publish first-key shell override changed the file" grep -Fxq '      - shell: sh' "$tmp/cfg/.github/workflows/publish.yml"
+must_fail "the workflow shell contract rejects first-key shell overrides" "publish.yml:[0-9]*.*only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^      - name: Audit producers.*latest releases$/a\        '\''shell'\'': sh' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit single-quoted shell key changed the file" grep -Fxq "        'shell': sh" "$tmp/cfg/.github/workflows/audit.yml"
+must_fail "the workflow shell contract rejects single-quoted shell keys" "audit.yml:[0-9]*.*only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^      - name: Audit producers.*latest releases$/a\        "shell": sh' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit double-quoted shell key changed the file" grep -Fxq '        "shell": sh' "$tmp/cfg/.github/workflows/audit.yml"
+must_fail "the workflow shell contract rejects double-quoted shell keys" "audit.yml:[0-9]*.*only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+sed -i '/^    timeout-minutes: 15$/a\    defaults: {run: {shell: sh}}' "$tmp/cfg/.github/workflows/audit.yml"
+check "the audit inline defaults shell override changed the file" grep -Fxq '    defaults: {run: {shell: sh}}' "$tmp/cfg/.github/workflows/audit.yml"
+must_fail "the workflow shell contract rejects inline defaults shell overrides" "audit.yml:[0-9]*.*only shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
 echo "1..$n"

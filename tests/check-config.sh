@@ -97,4 +97,26 @@ for f in "$ROOT"/.github/workflows/*.yml; do
 		fail "$(basename "$f") must set defaults.run.shell: bash (pipefail)"
 done
 
+# Step-level, step-first-key, quoted-key, and inline-default shell overrides
+# remove pipefail. The only accepted spelling is shell: bash; shell: "bash"
+# and action inputs named shell are rejected on purpose.
+shopt -s nullglob
+workflow_files=("$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml)
+if ((${#workflow_files[@]} == 0)); then
+	fail "no workflow files found in .github/workflows"
+fi
+for f in "${workflow_files[@]}"; do
+	while IFS=$'\t' read -r line value; do
+		[[ -n $line ]] || continue
+		fail "$(basename "$f"):$line sets $value; only shell: bash (pipefail) is allowed"
+	done < <(awk '
+		{
+			value = $0
+			sub(/^[[:space:]]*/, "", value)
+			if (value ~ /^#/ || $0 !~ /(^|[[:space:]{,-])[\047"]?shell[\047"]?[[:space:]]*:/) next
+			if ($0 !~ /^[[:space:]]*(-[[:space:]]+)?shell:[[:space:]]*bash[[:space:]]*$/)
+				print FNR "\t" value
+		}' "$f")
+done
+
 echo "ok - configuration"
