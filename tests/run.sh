@@ -2716,4 +2716,36 @@ check "the audit inline defaults shell override changed the file" grep -Fxq '   
 must_fail "the workflow shell contract rejects inline defaults shell overrides" "audit.yml:[0-9]*.*only shell: bash" \
 	"$tmp/cfg/tests/check-config.sh"
 
+copy_workflow_config
+cat >"$tmp/cfg/.github/workflows/extra.yaml" <<'EOF'
+name: extra
+on: workflow_dispatch
+permissions: {}
+jobs:
+  x:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: "true"
+EOF
+check "the extra YAML workflow fixture exists" test -f "$tmp/cfg/.github/workflows/extra.yaml"
+must_fail "the workflow shell contract checks YAML workflow defaults" "extra.yaml must set defaults.run.shell: bash" \
+	"$tmp/cfg/tests/check-config.sh"
+
+copy_workflow_config
+check "the copy shell scan contains shell[" grep -Fq 'shell[' "$tmp/cfg/tests/check-config.sh"
+mkdir "$tmp/shim-awk"
+real_awk=$(command -v awk)
+cat >"$tmp/shim-awk/awk" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+	case "\$arg" in
+		*shell\[* ) exit 2 ;;
+	esac
+done
+exec "$real_awk" "\$@"
+EOF
+chmod +x "$tmp/shim-awk/awk"
+must_fail "the workflow shell contract reports shell scan failure" "the shell scan failed" \
+	env "PATH=$tmp/shim-awk:$PATH" "$tmp/cfg/tests/check-config.sh"
+
 echo "1..$n"
