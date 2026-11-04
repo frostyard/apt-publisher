@@ -90,11 +90,34 @@ done
 
 # Every workflow runs its steps with bash -eo pipefail: GitHub's implicit
 # shell has no pipefail, so `script | tee` would hide a failed script.
-for f in "$ROOT"/.github/workflows/*.yml; do
+shopt -s nullglob
+workflow_files=("$ROOT"/.github/workflows/*.yml "$ROOT"/.github/workflows/*.yaml)
+if ((${#workflow_files[@]} == 0)); then
+	fail "no workflow files found in .github/workflows"
+fi
+for f in "${workflow_files[@]}"; do
 	# Blank and comment lines neither end the block nor count in it.
 	block=$(awk '/^defaults:/ { d = 1; next } /^[[:space:]]*(#|$)/ { next } d && /^[^ ]/ { d = 0 } d' "$f")
 	grep -qx '    shell: bash' <<<"$block" ||
 		fail "$(basename "$f") must set defaults.run.shell: bash (pipefail)"
+done
+
+# Step-level, step-first-key, quoted-key, and inline-default shell overrides
+# remove pipefail. The only accepted spelling is shell: bash; shell: "bash"
+# and action inputs named shell are rejected on purpose.
+for f in "${workflow_files[@]}"; do
+	bad=$(awk '
+		{
+			value = $0
+			sub(/^[[:space:]]*/, "", value)
+			if (value ~ /^#/ || $0 !~ /(^|[[:space:]{,-])[\047"]?shell[\047"]?[[:space:]]*:/) next
+			if ($0 !~ /^[[:space:]]*(-[[:space:]]+)?shell:[[:space:]]*bash[[:space:]]*$/)
+				print FNR " sets " value
+		}' "$f") || fail "$(basename "$f"): the shell scan failed"
+	if [[ -n $bad ]]; then
+		bad_line=$(head -n 1 <<<"$bad")
+		fail "$(basename "$f"):$bad_line; only shell: bash (pipefail) is allowed"
+	fi
 done
 
 echo "ok - configuration"
