@@ -13,7 +13,10 @@
 # Integrity: Debian's InRelease signature is not verified, since the runner has
 # no Debian keyring. HTTPS plus the SHA256 of each index in the Release file is
 # the check. That is enough for a report; a decision to move a producer is made
-# by a person who reads the finding.
+# by a person who reads the finding. When the Release says "Acquire-By-Hash:
+# yes" (Debian's do), each index is fetched as by-hash/SHA256/<digest>, as apt
+# does: a mirror in mid-sync can serve a plain Packages.xz from another sync
+# than its Release, but never other bytes under the digest.
 #
 # Prints "DEBIAN-NAME codename package suite[,suite...]", sorted, and exits 1
 # when there is a finding. A suite that does not exist (HTTP 404) is skipped.
@@ -48,7 +51,7 @@ fetch() {
 # The caller runs it on the left of ||, where errexit is off, so every step is
 # checked here and dies on failure.
 suite_names() {
-	local mirror=$1 suite=$2 archs=$3 out=$4 rel=$tmp/Release hash path arch url indexes=0
+	local mirror=$1 suite=$2 archs=$3 out=$4 rel=$tmp/Release hash path arch url dirname acquire_by_hash=no indexes=0
 	fetch "$mirror/dists/$suite/Release" "$rel" || return $?
 	# Refuse a file that is not a Release (an HTML page served with 200, an
 	# empty file). Index paths are listed only in the SHA256 section, as
@@ -62,6 +65,9 @@ suite_names() {
 		}
 		END { exit (bad || !seen) }' "$rel" >"$tmp/sha256.list" ||
 		die "$mirror/dists/$suite/Release is not a Release file with a valid SHA256 section"
+	if awk -F':[[:space:]]*' '$1 == "Acquire-By-Hash" { sub(/\r$/, "", $2); if ($2 == "yes") yes = 1 } END { exit !yes }' "$rel"; then
+		acquire_by_hash=yes
+	fi
 	: >"$out.unsorted"
 	# COMPONENT/debian-installer/ holds installer udebs, which no host
 	# installs: it does not match the pattern below.
@@ -69,7 +75,12 @@ suite_names() {
 		for arch in $archs; do
 			[[ $path =~ ^[^/]+/binary-$arch/Packages\.xz$ ]] || continue
 			indexes=$((indexes + 1))
-			url=$mirror/dists/$suite/$path
+			dirname=${path%/*}
+			if [[ $acquire_by_hash == yes ]]; then
+				url=$mirror/dists/$suite/$dirname/by-hash/SHA256/$hash
+			else
+				url=$mirror/dists/$suite/$path
+			fi
 			fetch "$url" "$tmp/Packages.xz" ||
 				die "$url is listed in its Release but missing"
 			[[ $(sha256sum <"$tmp/Packages.xz" | cut -d' ' -f1) == "$hash" ]] ||

@@ -960,7 +960,7 @@ check "the audit reports an unpublished release" \
 # whose SHA256 section matches the xz-compressed indexes.
 # mkindex MIRROR SUITE COMPONENT ARCH NAME... writes the index and its Release line.
 mkindex() {
-	local mirror=$1 suite=$2 component=$3 arch=$4 dir
+	local mirror=$1 suite=$2 component=$3 arch=$4 dir hash
 	shift 4
 	dir=$mirror/dists/$suite/$component/binary-$arch
 	mkdir -p "$dir"
@@ -970,13 +970,16 @@ mkindex() {
 	else
 		printf 'Package: %s\nVersion: 1\nArchitecture: all\n\n' "$@" | xz -c >"$dir/Packages.xz"
 	fi
-	printf ' %s %s %s/binary-%s/Packages.xz\n' "$(sha256sum <"$dir/Packages.xz" | cut -d' ' -f1)" \
+	hash=$(sha256sum <"$dir/Packages.xz" | cut -d' ' -f1)
+	mkdir -p "$dir/by-hash/SHA256"
+	cp "$dir/Packages.xz" "$dir/by-hash/SHA256/$hash"
+	printf ' %s %s %s/binary-%s/Packages.xz\n' "$hash" \
 		"$(stat -c %s "$dir/Packages.xz")" "$component" "$arch" >>"$mirror/dists/$suite/Release.sha"
 }
 # mkrelease MIRROR SUITE writes Release from the lines mkindex collected.
 mkrelease() {
 	{
-		printf 'Suite: %s\nComponents: main contrib\nSHA256:\n' "$2"
+		printf 'Suite: %s\nComponents: main contrib\nAcquire-By-Hash: yes\nSHA256:\n' "$2"
 		printf ' %064d 0 main/Contents-amd64.gz\n' 0
 		cat "$1/dists/$2/Release.sha"
 	} >"$1/dists/$2/Release"
@@ -1019,6 +1022,7 @@ must_pass "publish an image package with a Debian name" run publish.sh --produce
 # absent PATTERN FILE: the pattern is not in the file.
 absent() { ! grep -q "$@"; }
 debnames() { env APT_DEBIAN_MIRROR=file://"$debmirror" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"; }
+debnames_with() { env APT_DEBIAN_MIRROR=file://"$1" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"; }
 if debnames >"$tmp/out" 2>"$tmp/err"; then
 	not_ok "the Debian-name audit reports Debian names (unexpectedly passed)"
 fi
@@ -1038,10 +1042,46 @@ check "a name only in an architecture the codename does not publish is not repor
 	absent incus-client "$tmp/out"
 check "a missing suite is skipped" grep -q 'forky-backports does not exist' "$tmp/err"
 check "the findings are the only output" test "$(wc -l <"$tmp/out")" = 4
+cp "$tmp/out" "$tmp/debnames-normal.out"
+
+# A mirror in mid-sync serves a plain index from another sync than its Release
+# (the audit of 2026-11-05 died on trixie-updates). The audit reads the index
+# by hash, so the plain file neither fails it nor adds a name: frostyard-updex
+# in it must not be reported.
+rm -rf "$tmp/debmirror-race"
+cp -r "$debmirror" "$tmp/debmirror-race"
+printf 'Package: %s\nVersion: 1\nArchitecture: all\n\n' trixie-race-new frostyard-updex | xz -c \
+	>"$tmp/debmirror-race/dists/trixie-updates/main/binary-amd64/Packages.xz"
+race_rc=0
+debnames_with "$tmp/debmirror-race" >"$tmp/debnames-race.out" 2>"$tmp/debnames-race.err" || race_rc=$?
+check "a mirror sync race is not fatal" test "$race_rc" -eq 1
+check "a mirror sync race gives the same findings" cmp -s "$tmp/debnames-normal.out" "$tmp/debnames-race.out"
+
+# A by-hash file listed in the Release must exist.
+rm -rf "$tmp/debmirror-missing-hash"
+cp -r "$debmirror" "$tmp/debmirror-missing-hash"
+rm -f "$tmp/debmirror-missing-hash/dists/trixie/main/binary-amd64/by-hash/SHA256/"*
+must_fail "a missing by-hash index listed in the Release fails the audit" \
+	"is listed in its Release but missing" debnames_with "$tmp/debmirror-missing-hash"
+
+# Without Acquire-By-Hash, the audit reads and validates the plain path.
+rm -rf "$tmp/debmirror-no-acquire" "$tmp/debsec-no-acquire"
+cp -r "$debmirror" "$tmp/debmirror-no-acquire"
+cp -r "$debsec" "$tmp/debsec-no-acquire"
+sed -i '/^Acquire-By-Hash:[[:space:]]*yes$/d' "$tmp/debmirror-no-acquire"/dists/*/Release
+sed -i '/^Acquire-By-Hash:[[:space:]]*yes$/d' "$tmp/debsec-no-acquire"/dists/*/Release
+find "$tmp/debmirror-no-acquire/dists" "$tmp/debsec-no-acquire/dists" -type d -name by-hash -prune -exec rm -rf '{}' '+'
+no_acquire_rc=0
+env APT_DEBIAN_MIRROR=file://"$tmp/debmirror-no-acquire" \
+	APT_DEBIAN_SECURITY_MIRROR=file://"$tmp/debsec-no-acquire" \
+	"$ROOT/scripts/audit-debian-names.sh" >"$tmp/debnames-no-acquire.out" 2>"$tmp/debnames-no-acquire.err" || no_acquire_rc=$?
+check "a Release without Acquire-By-Hash is not fatal" test "$no_acquire_rc" -eq 1
+check "a plain-path audit gives the same findings" cmp -s "$tmp/debnames-normal.out" "$tmp/debnames-no-acquire.out"
 
 # A hash that does not match the Release is fatal, not "no names".
 cp -r "$debmirror" "$tmp/debmirror-bad"
-printf 'tampered' >>"$tmp/debmirror-bad/dists/trixie/main/binary-amd64/Packages.xz"
+bad_hash=$(sha256sum <"$tmp/debmirror-bad/dists/trixie/main/binary-amd64/Packages.xz" | cut -d' ' -f1)
+printf 'tampered' >>"$tmp/debmirror-bad/dists/trixie/main/binary-amd64/by-hash/SHA256/$bad_hash"
 must_fail "a Packages.xz that does not match its Release hash fails the audit" \
 	"does not match the SHA256 in its Release" \
 	env APT_DEBIAN_MIRROR=file://"$tmp/debmirror-bad" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"
@@ -1053,7 +1093,7 @@ must_fail "an unreachable mirror fails the audit" "cannot fetch" \
 # bytes from stdin, compressed or not as the caller made them, and fixes the
 # Release hash so only the content is wrong.
 bad_index() {
-	local copy=$1 file=$1/dists/trixie/main/binary-amd64/Packages.xz hash size
+	local copy=$1 file=$1/dists/trixie/main/binary-amd64/Packages.xz hash size dir
 	rm -rf "$copy"
 	cp -r "$debmirror" "$copy"
 	cat >"$file"
@@ -1061,6 +1101,9 @@ bad_index() {
 	size=$(stat -c %s "$file")
 	sed -i "s#^ [0-9a-f]\{64\} [0-9]* main/binary-amd64/Packages.xz\$# $hash $size main/binary-amd64/Packages.xz#" \
 		"$copy/dists/trixie/Release"
+	dir=$(dirname "$file")
+	mkdir -p "$dir/by-hash/SHA256"
+	cp "$file" "$dir/by-hash/SHA256/$hash"
 }
 # bad_release CONTENT... writes stdin as trixie's Release in a copy.
 bad_release() {
@@ -1068,8 +1111,6 @@ bad_release() {
 	cp -r "$debmirror" "$1"
 	cat >"$1/dists/trixie/Release"
 }
-debnames_with() { env APT_DEBIAN_MIRROR=file://"$1" APT_DEBIAN_SECURITY_MIRROR=file://"$debsec" "$ROOT/scripts/audit-debian-names.sh"; }
-
 printf 'this is not xz' | bad_index "$tmp/dm-notxz"
 must_fail "an invalid xz index with a matching hash fails the audit" "is not valid xz" debnames_with "$tmp/dm-notxz"
 printf 'Version: 1\nArchitecture: all\n\n' | xz -c | bad_index "$tmp/dm-nopkg"
