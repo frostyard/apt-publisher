@@ -1054,7 +1054,9 @@ printf 'Package: %s\nVersion: 1\nArchitecture: all\n\n' trixie-race-new frostyar
 	>"$tmp/debmirror-race/dists/trixie-updates/main/binary-amd64/Packages.xz"
 race_rc=0
 debnames_with "$tmp/debmirror-race" >"$tmp/debnames-race.out" 2>"$tmp/debnames-race.err" || race_rc=$?
+# Exit 1 is the findings; a die exits 1 too, so stderr must hold no error.
 check "a mirror sync race is not fatal" test "$race_rc" -eq 1
+check "a mirror sync race prints no error" absent '^error:' "$tmp/debnames-race.err"
 check "a mirror sync race gives the same findings" cmp -s "$tmp/debnames-normal.out" "$tmp/debnames-race.out"
 
 # A by-hash file listed in the Release must exist.
@@ -1076,6 +1078,7 @@ env APT_DEBIAN_MIRROR=file://"$tmp/debmirror-no-acquire" \
 	APT_DEBIAN_SECURITY_MIRROR=file://"$tmp/debsec-no-acquire" \
 	"$ROOT/scripts/audit-debian-names.sh" >"$tmp/debnames-no-acquire.out" 2>"$tmp/debnames-no-acquire.err" || no_acquire_rc=$?
 check "a Release without Acquire-By-Hash is not fatal" test "$no_acquire_rc" -eq 1
+check "a Release without Acquire-By-Hash prints no error" absent '^error:' "$tmp/debnames-no-acquire.err"
 check "a plain-path audit gives the same findings" cmp -s "$tmp/debnames-normal.out" "$tmp/debnames-no-acquire.out"
 
 # A hash that does not match the Release is fatal, not "no names".
