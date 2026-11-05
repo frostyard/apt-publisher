@@ -134,8 +134,11 @@ Delete it once it's stale.
 - **first-setup is retired** (plan T843, task t5). chairlift's first run
   replaced `snow-first-setup` on Snow and Snowfield (snosi ADR-0028,
   frostyard/snosi#1224, merged 2026-11-05).
-  - Its producer row is gone from `config/producers.tsv`, so no release
-    or re-run can publish the name again.
+  - Its producer row is gone from `config/producers.tsv`, so a new publish
+    run refuses the name. Two paths can still bring it back after the
+    withdrawal, and neither may run: a re-run of an old publish run (it
+    checks out its own, older commit, which still registers the producer),
+    and a rollback to a snapshot that lists `snow-first-setup`.
   - The batch `withdrawals/2026-11-05-snow-first-setup.txt` withdraws all
     10 versions in `trixie` main (0.1.1 to 0.4.1, `Architecture: all`). It
     runs after the soak (14 days and 3 green snosi main builds without the

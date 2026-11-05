@@ -38,6 +38,12 @@ the signing workflow and ref that an attested producer names.
   is unreadable.
 - Rollback rebuilds the working repository from the snapshot (`rebuild_repo`);
   otherwise the next publication would restore what was rolled back.
+- Removing a producer row stops only new publish runs. A re-run of an old
+  publish run checks out its own commit, which still registers the producer,
+  and `switch.sh` does not judge names without a producer, so a rollback
+  restores them. When a producer retires, its withdrawal batch and HANDOFF
+  must say that neither path may run after the withdrawal; never claim that
+  unregistration alone keeps a name out.
 - A codename publishes the components in `config/codenames.tsv` (`main`, or
   `main,image`; core ADR-0059). A package name lives in one component per
   codename: `publish.sh` refuses a name that the other component already has.
