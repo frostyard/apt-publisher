@@ -1,0 +1,29 @@
+# Withdraw from trixie: every published version of snow-first-setup, the
+# deb of frostyard/first-setup, which retires (plan T843 task t5). chairlift's
+# first run replaced it on Snow and Snowfield (snosi ADR-0028, snosi#1224,
+# 770f9a3c); no snosi build input names it, and no published package
+# depends on it. 10 rows, all in trixie main, Architecture: all (one row
+# covers both indexes), taken from the published index on 2026-11-05. forky
+# never had it. The pool files stay, and the legacy stable suite is not
+# touched (it is frozen).
+#
+# Order: run this only after the soak (14 days and 3 consecutive green snosi
+# main builds without snow-first-setup, so on or after 2026-11-19) and after
+# the PR that adds this file has merged. That PR also removes the
+# frostyard/first-setup producer, so no release or re-run can publish the
+# name again.
+#
+# Run: the withdraw workflow, codename trixie, batch
+# 2026-11-05-snow-first-setup.txt; dry_run true first.
+#
+# NAME VERSION
+snow-first-setup 0.1.1
+snow-first-setup 0.2.8
+snow-first-setup 0.2.13
+snow-first-setup 0.2.14
+snow-first-setup 0.2.15
+snow-first-setup 0.2.16
+snow-first-setup 0.2.17
+snow-first-setup 0.3.0
+snow-first-setup 0.4.0
+snow-first-setup 0.4.1
