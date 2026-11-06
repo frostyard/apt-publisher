@@ -2,8 +2,9 @@
 
 This repository is the single writer of Frostyard's APT metadata at
 `repository.frostyard.org/debian`. aptly does the publishing; bash scripts in
-`scripts/` hold the policy; GitHub workflows call them. The README explains
-the flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision;
+`scripts/` hold the policy; GitHub workflows call them. The README is the
+front page; [docs/design/overview.md](docs/design/overview.md) explains the
+flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision;
 [ADR-0002](docs/adr/0002-two-components-per-codename.md) records the two
 components per codename, the move, the published key and the Debian-name
 audit (core ADR-0059), and
@@ -41,9 +42,10 @@ the signing workflow and ref that an attested producer names.
 - Removing a producer row stops only new publish runs. A re-run of an old
   publish run checks out its own commit, which still registers the producer,
   and `switch.sh` does not judge names without a producer, so a rollback
-  restores them. When a producer retires, its withdrawal batch and HANDOFF
-  must say that neither path may run after the withdrawal; never claim that
-  unregistration alone keeps a name out.
+  restores them. When a producer retires, its withdrawal batch and the
+  retirement record in `docs/runbooks/producers.md` must say that neither path
+  may run after the withdrawal; never claim that unregistration alone keeps a
+  name out.
 - A codename publishes the components in `config/codenames.tsv` (`main`, or
   `main,image`; core ADR-0059). A package name lives in one component per
   codename: `publish.sh` refuses a name that the other component already has.
@@ -62,8 +64,22 @@ the signing workflow and ref that an attested producer names.
 - Request values (`repo`, `tag`, `codenames`) reach scripts through `env:`,
   never through `${{ }}` inside `run:`.
 
+## Documentation
+
+`docs/README.md` is the index. A decision about this repository gets an ADR in
+`docs/adr/`; an org-wide one goes to frostyard/core and is listed in
+`docs/org-adrs.md`. The root `README.md` follows core's README spec (kind
+`packaging`, at most 1000 words); the flow, the contracts and the runbooks go
+in `docs/`.
+
 ## Gates
 
-`make verify` runs shellcheck, actionlint, `tests/check-config.sh` and the
-end-to-end `tests/run.sh`. Tools are pinned in `mise.toml`. Add a test to
-`tests/run.sh` for every new refusal or routing rule.
+`make verify` runs `make lint` and the end-to-end `tests/run.sh`. `make lint`
+runs shellcheck, actionlint, `tests/check-config.sh`, `tests/check-baseline.sh`
+and `tests/check-baseline-test.sh`, the baseline check's negative tests. Tools
+are pinned in `mise.toml`. Add a test to `tests/run.sh` for every new refusal
+or routing rule, and a case to `tests/check-baseline-test.sh` for every new
+rule in `tests/check-baseline.sh`: a guard needs a committed test that fails
+when the guard is reverted. A PR that touches a path in
+`.github/risk-paths.json` gets the `risk:high` label, and its body names each
+matched path and why the change is safe.
