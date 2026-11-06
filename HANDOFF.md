@@ -141,9 +141,11 @@ Delete it once it's stale.
     and a rollback to a snapshot that lists `snow-first-setup`.
   - The batch `withdrawals/2026-11-05-snow-first-setup.txt` withdraws all
     10 versions in `trixie` main (0.1.1 to 0.4.1, `Architecture: all`). It
-    runs after the soak (14 days and 3 green snosi main builds without the
-    package) and after the unregistration merged. The pool files stay.
-    forky never had it; the frozen `stable` suite still lists it.
+    runs after the unregistration merged, with no soak (Brian, T902a,
+    2026-11-05). The pool files stay. forky never had it; the frozen
+    `stable` suite still lists it.
+  - To bring it back on purpose (for example to revert snosi#1224): restore
+    the producer row by a PR, then dispatch publish for first-setup v0.4.1.
   - No published package depends on it, and no snosi build input names it.
   - The audit no longer reads first-setup's releases.
 - **gchlog is retired** (archived 2026-10-21). It was never registered or
