@@ -29,19 +29,83 @@ for alias in CLAUDE.md GEMINI.md .cursorrules .github/copilot-instructions.md; d
 		fail "$alias resolves to $resolved, not AGENTS.md"
 done
 
-# B2: the corrections inbox: one JSON object per line, 5 fields (ADR-0018).
+# B2: the corrections inbox (ADR-0018): the rules of core's
+# scripts/check-corrections.mjs. Every line is a JSON object with exactly the 5
+# string fields, no duplicate key, a real YYYY-MM-DD date, and no empty
+# scope, correction or evidence. A blank line fails; the last line counts with
+# or without a trailing newline. The path is an argument, never part of the
+# Python source.
 corrections=$ROOT/.memory/corrections.jsonl
 [[ -f $corrections ]] || fail ".memory/corrections.jsonl is missing"
-correction_lines=0
-while IFS= read -r line; do
-	[[ -n ${line//[[:space:]]/} ]] || continue
-	keys=$(printf '%s' "$line" |
-		jq -r 'if type == "object" then (keys | sort | join(",")) else "not-an-object" end' 2>/dev/null) ||
-		fail ".memory/corrections.jsonl is not valid JSON: $line"
-	[[ $keys == correction,date,evidence,promoted_to,scope ]] ||
-		fail ".memory/corrections.jsonl needs exactly the fields correction, date, evidence, promoted_to, scope; got $keys"
-	correction_lines=$((correction_lines + 1))
-done <"$corrections"
+correction_lines=$(python3 - "$corrections" <<'PY'
+import datetime
+import json
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+lines = text.split("\n")
+if lines and lines[-1] == "":
+    lines.pop()
+required = ("date", "scope", "correction", "evidence", "promoted_to")
+
+
+class DuplicateKey(Exception):
+    pass
+
+
+def pairs(items):
+    names = [name for name, _ in items]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise DuplicateKey("duplicate key(s): " + ", ".join(duplicates))
+    return dict(items)
+
+
+def problem(number, message):
+    sys.stderr.write(f"{path}:{number}: {message}\n")
+    sys.exit(1)
+
+
+for number, line in enumerate(lines, 1):
+    if line.strip() == "":
+        problem(number, "blank line")
+    try:
+        value = json.loads(line, object_pairs_hook=pairs)
+    except DuplicateKey as error:
+        problem(number, str(error))
+    except ValueError:
+        problem(number, "invalid JSON")
+    if not isinstance(value, dict):
+        problem(number, "not a JSON object")
+    missing = [key for key in required if key not in value]
+    unknown = [key for key in value if key not in required]
+    if missing or unknown:
+        parts = []
+        if missing:
+            parts.append("missing key(s): " + ", ".join(missing))
+        if unknown:
+            parts.append("unknown key(s): " + ", ".join(unknown))
+        problem(number, "; ".join(parts))
+    for key in required:
+        if not isinstance(value[key], str):
+            problem(number, f"value for {key} is not a string")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value["date"]):
+        problem(number, f"invalid date: {value['date']}")
+    try:
+        datetime.date.fromisoformat(value["date"])
+    except ValueError:
+        problem(number, f"invalid date: {value['date']}")
+    for key in ("scope", "correction", "evidence"):
+        if value[key].strip() == "":
+            problem(number, f"{key} is empty")
+sys.stdout.write(str(len(lines)))
+PY
+) || fail "the corrections check failed; see the line above"
+[[ $correction_lines =~ ^[0-9]+$ ]] ||
+	fail "the corrections check printed no line count"
 
 # B3: the docs shape (core ADR-0025): the index, the org ADR list and the 4
 # category templates.
@@ -124,16 +188,42 @@ for f in "${workflow_files[@]}"; do
 	' "$f") || fail "$name: the permissions scan failed"
 	[[ -z $problem ]] || fail "${problem%%$'\n'*}"
 
+	# A checkout can be any key of a list item, not only its first key
+	# (`- name: Checkout` then `uses: actions/checkout@...`). Scan by list
+	# item: it starts at a `- ` line and ends at the next line that is not
+	# blank and not a comment and whose indent is at most the dash indent, or
+	# at end of file. A deeper `- ` line belongs to the item.
 	problem=$(awk -v name="$name" '
-		/-[[:space:]]+uses:[[:space:]]+actions\/checkout@/ { want = 1; start = FNR; found = 0 }
-		want && FNR != start && /^[[:space:]]*-[[:space:]]/ {
-			if (!found) { print name ":" start ": the checkout step does not set persist-credentials: false"; want = 0; exit }
-			want = 0
+		{
+			line = $0
+			quiet = (line ~ /^[[:space:]]*(#|$)/)
+			rest = line
+			sub(/^ */, "", rest)
+			indent = length(line) - length(rest)
 		}
-		want && /^[[:space:]]+persist-credentials:[[:space:]]+false[[:space:]]*$/ { found = 1 }
-		END {
-			if (want && !found) print name ":" start ": the checkout step does not set persist-credentials: false"
+		in_item && !quiet && indent <= dash {
+			finish()
 		}
+		!in_item && line ~ /^ *- / {
+			in_item = 1
+			start = FNR
+			dash = indent
+			has_checkout = 0
+			has_persist = 0
+		}
+		in_item && !quiet {
+			if (line ~ /(^|[[:space:]-])uses:[[:space:]]*actions\/checkout@/) has_checkout = 1
+			if (line ~ /^[[:space:]]*persist-credentials:[[:space:]]*false[[:space:]]*$/) has_persist = 1
+		}
+		function finish() {
+			if (has_checkout && !has_persist) {
+				reported = 1
+				print name ":" start ": the checkout step does not set persist-credentials: false"
+				exit
+			}
+			in_item = 0
+		}
+		END { if (in_item && has_checkout && !has_persist && !reported) print name ":" start ": the checkout step does not set persist-credentials: false" }
 	' "$f") || fail "$name: the checkout scan failed"
 	[[ -z $problem ]] || fail "${problem%%$'\n'*}"
 

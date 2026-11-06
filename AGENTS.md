@@ -75,8 +75,11 @@ in `docs/`.
 ## Gates
 
 `make verify` runs `make lint` and the end-to-end `tests/run.sh`. `make lint`
-runs shellcheck, actionlint, `tests/check-config.sh` and
-`tests/check-baseline.sh`. Tools are pinned in `mise.toml`. Add a test to
-`tests/run.sh` for every new refusal or routing rule. A PR that touches a path
-in `.github/risk-paths.json` gets the `risk:high` label, and its body names
-each matched path and why the change is safe.
+runs shellcheck, actionlint, `tests/check-config.sh`, `tests/check-baseline.sh`
+and `tests/check-baseline-test.sh`, the baseline check's negative tests. Tools
+are pinned in `mise.toml`. Add a test to `tests/run.sh` for every new refusal
+or routing rule, and a case to `tests/check-baseline-test.sh` for every new
+rule in `tests/check-baseline.sh`: a guard needs a committed test that fails
+when the guard is reverted. A PR that touches a path in
+`.github/risk-paths.json` gets the `risk:high` label, and its body names each
+matched path and why the change is safe.

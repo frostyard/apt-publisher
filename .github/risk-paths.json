@@ -7,35 +7,35 @@
     },
     {
       "glob": ".github/workflows/**",
-      "why": "governance: the writer workflows publish, withdraw, rollback, move and import-stable, the secrets check, CI and the risk-paths caller, and the token permissions they set"
+      "why": "publication: the writer workflows publish, withdraw, rollback, move and import-stable, the secrets check, CI and the risk-paths caller, plus their token permissions"
     },
     {
       "glob": ".github/actionlint.yaml",
-      "why": "gate configuration: it decides which workflow errors the lint step ignores"
+      "why": "governance: the gate configuration; it decides which workflow errors the lint step ignores"
     },
     {
       "glob": ".shellcheckrc",
-      "why": "gate configuration: it decides how shellcheck reads the scripts"
+      "why": "governance: the gate configuration; it decides how shellcheck reads the scripts"
     },
     {
       "glob": "scripts/**",
-      "why": "publishing, signing, verification, withdrawal and secret handling: the policy of the single writer"
+      "why": "publication: publishing, signing, verification, withdrawal and secret handling: the policy of the single writer"
     },
     {
       "glob": "config/**",
-      "why": "who may publish which package names, the codenames and components, the buckets and the signing key fingerprint"
+      "why": "publication: who may publish which package names, the codenames and components, the buckets and the signing key fingerprint"
     },
     {
       "glob": "keys/**",
-      "why": "the published signing keyring: hosts install it as their trust anchor"
+      "why": "signing and keys: the published signing keyring, which hosts install as their trust anchor"
     },
     {
       "glob": "withdrawals/**",
-      "why": "batch files that withdraw published packages when the withdraw workflow runs them"
+      "why": "destructive operations: batch files that withdraw published packages when the withdraw workflow runs them"
     },
     {
       "glob": "tests/**",
-      "why": "the gate's checks of the single-writer invariants, including the end-to-end publication test"
+      "why": "governance: the gate's checks of the single-writer invariants, including the end-to-end publication test"
     },
     {
       "glob": "Makefile",
@@ -43,11 +43,11 @@
     },
     {
       "glob": "mise.toml",
-      "why": "supply chain: the tool pins that CI installs"
+      "why": "governance: the tool pins that CI installs"
     },
     {
       "glob": "mise.lock",
-      "why": "supply chain: the checksums of the tools that CI installs"
+      "why": "governance: the checksums of the tools that CI installs"
     }
   ]
 }

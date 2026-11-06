@@ -9,11 +9,12 @@ check: verify ## Developer gate (nothing to format)
 
 ci: verify ## CI gate
 
-lint: ## shellcheck, actionlint, configuration and baseline checks
+lint: ## shellcheck, actionlint, configuration checks, and the baseline with its negative tests
 	shellcheck scripts/*.sh tests/*.sh
 	actionlint
 	tests/check-config.sh
 	tests/check-baseline.sh
+	tests/check-baseline-test.sh
 
 test: ## End-to-end test against a local S3 server
 	timeout 600 tests/run.sh

@@ -27,7 +27,8 @@ directory of mode 700, which a stricter umask gives the test fixtures.
 `make verify` is the gate; `make check` and `make ci` both run it.
 
 - `make lint` runs `shellcheck scripts/*.sh tests/*.sh`, `actionlint`,
-  `tests/check-config.sh` and `tests/check-baseline.sh`.
+  `tests/check-config.sh`, `tests/check-baseline.sh` and
+  `tests/check-baseline-test.sh`.
 - `make test` runs `timeout 600 tests/run.sh`.
 - `tests/check-config.sh` checks the committed configuration without
   credentials: the keyring's fingerprint, `config/codenames.tsv` and
@@ -43,6 +44,12 @@ directory of mode 700, which a stricter umask gives the test fixtures.
   agent-framework trees, and the README kind marker and length. The rows are
   in core's
   [repository baseline spec](https://github.com/frostyard/core/blob/main/docs/specs/repository-baseline.md).
+- `tests/check-baseline-test.sh` is the baseline check's negative harness. Each
+  case copies the working tree to a temporary directory, applies 1 mutation
+  and requires the check to fail with a known message; 1 case requires the
+  unmutated copy to pass, and a mutation that changes nothing fails its case.
+  It prints `ok N - case` and `1..N`. Add a case for every new rule in
+  `tests/check-baseline.sh`.
 
 Tools are pinned in `mise.toml`. Add a test to `tests/run.sh` for every new
 refusal or routing rule.
