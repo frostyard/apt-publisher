@@ -1,0 +1,34 @@
+# Withdraw from trixie: every published version of snow-first-setup, the
+# deb of frostyard/first-setup, which retires (plan T843 task t5). chairlift's
+# first run replaced it on Snow and Snowfield (snosi ADR-0028, snosi#1224,
+# 770f9a3c); no snosi build input names it, and no published package
+# depends on it. 10 rows, all in trixie main, Architecture: all (one row
+# covers both indexes), taken from the published index on 2026-11-05. forky
+# never had it. The pool files stay, and the legacy stable suite is not
+# touched (it is frozen).
+#
+# Order: run this only after the PR that adds this file has merged; there is
+# no soak (Brian, T902a, 2026-11-05: "Withdraw now"). That PR also removes the
+# frostyard/first-setup producer, so a new publish run refuses the name.
+# Two paths can still bring it back, and neither may run after the
+# withdrawal: a re-run of an old publish run (a re-run checks out its own,
+# older commit, which still registers the producer), and a rollback to a
+# snapshot that lists snow-first-setup (switch.sh does not judge names
+# without a producer). To bring the package back on purpose, restore the
+# producer row by a PR, then dispatch publish for first-setup v0.4.1 (the
+# pool file stays).
+#
+# Run: the withdraw workflow, codename trixie, batch
+# 2026-11-05-snow-first-setup.txt; dry_run true first.
+#
+# NAME VERSION
+snow-first-setup 0.1.1
+snow-first-setup 0.2.8
+snow-first-setup 0.2.13
+snow-first-setup 0.2.14
+snow-first-setup 0.2.15
+snow-first-setup 0.2.16
+snow-first-setup 0.2.17
+snow-first-setup 0.3.0
+snow-first-setup 0.4.0
+snow-first-setup 0.4.1

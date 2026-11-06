@@ -113,7 +113,7 @@ Delete it once it's stale.
   | incus | 7.5.1, 2026-10-03 | trixie | no (branch-push releases) |
   | intuneme | v0.20.3, 2026-10-04 | trixie, forky | yes |
   | firn | v0.6.1, 2026-10-04 | trixie, forky (amd64 and arm64) | yes |
-  | first-setup | v0.4.1, 2026-10-04 | trixie | yes |
+  | first-setup (retired, see below) | v0.4.1, 2026-10-04 | trixie | yes |
   | bootc-debian | `bootc-1.16.8-ostree-2026.3-202610040153`, 2026-10-04 | trixie (`~deb13`) | no (manual runs on `main`) |
   | chairlift | v0.11.2, 2026-10-04 | trixie (amd64 and arm64) | yes |
   | omarchy-apps | `main-20261022024102-da2ea04`, 2026-10-22 | trixie (amd64) | no (pushes to `main`) |
@@ -131,6 +131,23 @@ Delete it once it's stale.
 - **Not ported, by decision on 2026-10-04:** pilothouse and snowcat-cockpit.
   snosi doesn't install them from APT, and their old repogen deb steps fail
   for lack of credentials. snowcat-cockpit is archived.
+- **first-setup is retired** (plan T843, task t5). chairlift's first run
+  replaced `snow-first-setup` on Snow and Snowfield (snosi ADR-0028,
+  frostyard/snosi#1224, merged 2026-11-05).
+  - Its producer row is gone from `config/producers.tsv`, so a new publish
+    run refuses the name. Two paths can still bring it back after the
+    withdrawal, and neither may run: a re-run of an old publish run (it
+    checks out its own, older commit, which still registers the producer),
+    and a rollback to a snapshot that lists `snow-first-setup`.
+  - The batch `withdrawals/2026-11-05-snow-first-setup.txt` withdraws all
+    10 versions in `trixie` main (0.1.1 to 0.4.1, `Architecture: all`). It
+    runs after the unregistration merged, with no soak (Brian, T902a,
+    2026-11-05). The pool files stay. forky never had it; the frozen
+    `stable` suite still lists it.
+  - To bring it back on purpose (for example to revert snosi#1224): restore
+    the producer row by a PR, then dispatch publish for first-setup v0.4.1.
+  - No published package depends on it, and no snosi build input names it.
+  - The audit no longer reads first-setup's releases.
 - **gchlog is retired** (archived 2026-10-21). It was never registered or
   published. The `trixie` migration needs no separate canary: eight producers
   publish to it.
@@ -331,9 +348,9 @@ it doesn't carry.
 - **Phase 6, forky.**
   - intuneme, firn and updex already publish to forky: static builds, the
     same file in both codenames.
-  - chairlift and first-setup are trixie-only until a smoke test on a forky
-    image. chairlift's GTK4/libadwaita are loaded at runtime with no
-    `Depends`; first-setup's dependencies all exist in forky.
+  - chairlift is trixie-only until a smoke test on a forky image. Its
+    GTK4/libadwaita are loaded at runtime with no `Depends`. (first-setup
+    retired before it reached forky.)
   - bootc-debian needs:
     - a `debian:forky` build with `~deb14` versions and per-codename
       `Depends`;
