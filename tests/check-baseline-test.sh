@@ -403,13 +403,17 @@ done
 
 # The guard against a work directory inside the repository, tested on a
 # scratch copy so the real repository is never the tree under test. The inner
-# run must stop before it copies anything, so it cannot recurse.
+# run must stop before it copies anything. Its tar is a stub that records a
+# sentinel and fails, so a missing guard fails at once and cannot recurse.
 run_tmpdir_guard() {
 	local id=tmpdir_inside_repository dir=$work/guard-tree out=$work/guard.out status
+	local stub=$work/guard-bin sentinel=$work/guard-tar-ran
 	cases=$((cases + 1))
 	copy_tree "$dir"
-	mkdir -p "$dir/var/tmp"
-	if (cd "$dir" && TMPDIR=$dir/var/tmp "$dir/tests/check-baseline-test.sh") >"$out" 2>&1; then
+	mkdir -p "$dir/var/tmp" "$stub"
+	printf '#!/bin/sh\n: >"%s"\nexit 1\n' "$sentinel" >"$stub/tar"
+	chmod +x "$stub/tar"
+	if (cd "$dir" && PATH=$stub:$PATH TMPDIR=$dir/var/tmp "$dir/tests/check-baseline-test.sh") >"$out" 2>&1; then
 		status=0
 	else
 		status=$?
@@ -421,6 +425,11 @@ run_tmpdir_guard() {
 	fi
 	if ! grep -q 'is inside the repository' "$out"; then
 		printf 'not ok %d - %s: no message about the work directory\n' "$cases" "$id"
+		failures=$((failures + 1))
+		return 0
+	fi
+	if [[ -e $sentinel ]]; then
+		printf 'not ok %d - %s: the inner harness started a copy\n' "$cases" "$id"
 		failures=$((failures + 1))
 		return 0
 	fi
