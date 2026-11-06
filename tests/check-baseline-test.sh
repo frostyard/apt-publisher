@@ -6,9 +6,17 @@
 # goes away on exit.
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(realpath "$(cd "$(dirname "$0")/.." && pwd)")
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+# The harness copies the tree into its work directory, so a work directory
+# inside the repository would copy itself and recurse. Refuse it at once.
+work=$(realpath "$work")
+if [[ $work == "$ROOT" || $work == "$ROOT"/* ]]; then
+	printf 'not ok - the work directory %s is inside the repository %s\n' "$work" "$ROOT" >&2
+	rm -rf "$work"
+	exit 1
+fi
 
 cases=0
 failures=0
@@ -136,6 +144,21 @@ mut_b2_empty_evidence() {
 	changed "$2" "$1" .memory/corrections.jsonl
 }
 
+# Two valid records separated by a lone \r, and no \n: core splits on \n, so
+# this is 1 line and 1 invalid JSON record.
+mut_b2_cr_separated_records() {
+	printf '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}\r{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}' \
+		>>"$1/.memory/corrections.jsonl"
+	changed "$2" "$1" .memory/corrections.jsonl
+}
+
+# A record whose evidence is only a byte-order mark: JavaScript trims it away.
+mut_b2_bom_evidence() {
+	printf '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "\xef\xbb\xbf", "promoted_to": ""}\n' \
+		>>"$1/.memory/corrections.jsonl"
+	changed "$2" "$1" .memory/corrections.jsonl
+}
+
 # B3: the docs shape.
 mut_b3_no_org_adrs() {
 	rm -f "$1/docs/org-adrs.md"
@@ -173,6 +196,29 @@ mut_b5_no_persist_credentials() {
 # `- name:` and the `uses:` line comes next.
 mut_b5_name_first_checkout() {
 	printf 'name: fixture\n\non:\n  workflow_dispatch:\n\npermissions: {}\n\ndefaults:\n  run:\n    shell: bash\n\njobs:\n  fixture:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Checkout\n        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n' \
+		>"$1/.github/workflows/fixture.yml"
+	changed "$2" "$1" .github/workflows/fixture.yml
+}
+
+# A step written as a bare dash: YAML allows `-` alone, with the keys on the
+# lines below it.
+mut_b5_bare_dash_checkout() {
+	printf 'name: fixture\n\non:\n  workflow_dispatch:\n\npermissions: {}\n\ndefaults:\n  run:\n    shell: bash\n\njobs:\n  fixture:\n    runs-on: ubuntu-24.04\n    steps:\n      -\n        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n' \
+		>"$1/.github/workflows/fixture.yml"
+	changed "$2" "$1" .github/workflows/fixture.yml
+}
+
+# 2 adjacent steps: the second checkout has no persist-credentials, so the
+# report names the second step's line, not the first.
+mut_b5_second_step_missing_persist() {
+	printf 'name: fixture\n\non:\n  workflow_dispatch:\n\npermissions: {}\n\ndefaults:\n  run:\n    shell: bash\n\njobs:\n  fixture:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n        with:\n          persist-credentials: false\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n' \
+		>"$1/.github/workflows/fixture.yml"
+	changed "$2" "$1" .github/workflows/fixture.yml
+}
+
+# The reverse: the first checkout has none, so the report names the first step.
+mut_b5_first_step_missing_persist() {
+	printf 'name: fixture\n\non:\n  workflow_dispatch:\n\npermissions: {}\n\ndefaults:\n  run:\n    shell: bash\n\njobs:\n  fixture:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n        with:\n          persist-credentials: false\n' \
 		>"$1/.github/workflows/fixture.yml"
 	changed "$2" "$1" .github/workflows/fixture.yml
 }
@@ -282,6 +328,8 @@ order=(
 	b2_non_string_value
 	b2_invalid_date
 	b2_empty_evidence
+	b2_cr_separated_records
+	b2_bom_evidence
 	b3_no_org_adrs
 	b3_no_plans_template
 	b4_ci_without_verify
@@ -289,6 +337,9 @@ order=(
 	b5_unpinned_uses
 	b5_no_persist_credentials
 	b5_name_first_checkout
+	b5_bare_dash_checkout
+	b5_second_step_missing_persist
+	b5_first_step_missing_persist
 	b5_permissions_write_all
 	b5_permissions_write_scope
 	b6_no_risk_json
@@ -317,13 +368,18 @@ declare -A expected=(
 	[b2_non_string_value]='value for promoted_to is not a string'
 	[b2_invalid_date]='invalid date: 2026-02-30'
 	[b2_empty_evidence]='evidence is empty'
+	[b2_cr_separated_records]='invalid JSON'
+	[b2_bom_evidence]='evidence is empty'
 	[b3_no_org_adrs]='docs/org-adrs.md is missing'
 	[b3_no_plans_template]='docs/plans/TEMPLATE.md is missing'
 	[b4_ci_without_verify]='the Makefile ci: rule must list verify'
 	[b4_no_mise_lock]='mise.lock is missing'
 	[b5_unpinned_uses]='uses is not pinned to a 40-character commit SHA'
 	[b5_no_persist_credentials]='the checkout step does not set persist-credentials: false'
-	[b5_name_first_checkout]='the checkout step does not set persist-credentials: false'
+	[b5_name_first_checkout]='.github/workflows/fixture.yml:16: the checkout step does not set persist-credentials: false'
+	[b5_bare_dash_checkout]='.github/workflows/fixture.yml:16: the checkout step does not set persist-credentials: false'
+	[b5_second_step_missing_persist]='.github/workflows/fixture.yml:19: the checkout step does not set persist-credentials: false'
+	[b5_first_step_missing_persist]='.github/workflows/fixture.yml:16: the checkout step does not set persist-credentials: false'
 	[b5_permissions_write_all]='the permissions line must be permissions: {} or a block of read scopes'
 	[b5_permissions_write_scope]='the permissions block holds a scope that is not read'
 	[b6_no_risk_json]='.github/risk-paths.json is missing'
@@ -344,6 +400,39 @@ declare -A expected=(
 for id in "${order[@]}"; do
 	run_case "$id" "${expected[$id]-}"
 done
+
+# The guard against a work directory inside the repository, tested on a
+# scratch copy so the real repository is never the tree under test. The inner
+# run must stop before it copies anything, so it cannot recurse.
+run_tmpdir_guard() {
+	local id=tmpdir_inside_repository dir=$work/guard-tree out=$work/guard.out status
+	cases=$((cases + 1))
+	copy_tree "$dir"
+	mkdir -p "$dir/var/tmp"
+	if (cd "$dir" && TMPDIR=$dir/var/tmp "$dir/tests/check-baseline-test.sh") >"$out" 2>&1; then
+		status=0
+	else
+		status=$?
+	fi
+	if ((status == 0)); then
+		printf 'not ok %d - %s: the inner harness exited 0\n' "$cases" "$id"
+		failures=$((failures + 1))
+		return 0
+	fi
+	if ! grep -q 'is inside the repository' "$out"; then
+		printf 'not ok %d - %s: no message about the work directory\n' "$cases" "$id"
+		failures=$((failures + 1))
+		return 0
+	fi
+	if [[ -n $(ls -A "$dir/var/tmp") ]]; then
+		printf 'not ok %d - %s: %s is left behind\n' "$cases" "$id" "$(ls -A "$dir/var/tmp")"
+		failures=$((failures + 1))
+		return 0
+	fi
+	printf 'ok %d - %s\n' "$cases" "$id"
+}
+
+run_tmpdir_guard
 
 printf '1..%d\n' "$cases"
 if ((failures > 0)); then

@@ -44,12 +44,23 @@ import re
 import sys
 
 path = sys.argv[1]
-with open(path, encoding="utf-8") as handle:
+with open(path, encoding="utf-8", newline="") as handle:
     text = handle.read()
 lines = text.split("\n")
 if lines and lines[-1] == "":
     lines.pop()
 required = ("date", "scope", "correction", "evidence", "promoted_to")
+# The whitespace that JavaScript's String.prototype.trim() removes: a lone
+# "\r" and a byte-order mark are whitespace to a reader's JavaScript.
+WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680"
+    + "".join(chr(code) for code in range(0x2000, 0x200B))
+    + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def trimmed(text):
+    return text.strip(WHITESPACE)
 
 
 class DuplicateKey(Exception):
@@ -70,7 +81,7 @@ def problem(number, message):
 
 
 for number, line in enumerate(lines, 1):
-    if line.strip() == "":
+    if trimmed(line) == "":
         problem(number, "blank line")
     try:
         value = json.loads(line, object_pairs_hook=pairs)
@@ -99,7 +110,7 @@ for number, line in enumerate(lines, 1):
     except ValueError:
         problem(number, f"invalid date: {value['date']}")
     for key in ("scope", "correction", "evidence"):
-        if value[key].strip() == "":
+        if trimmed(value[key]) == "":
             problem(number, f"{key} is empty")
 sys.stdout.write(str(len(lines)))
 PY
@@ -204,7 +215,7 @@ for f in "${workflow_files[@]}"; do
 		in_item && !quiet && indent <= dash {
 			finish()
 		}
-		!in_item && line ~ /^ *- / {
+		!in_item && line ~ /^ *-([[:space:]]|$)/ {
 			in_item = 1
 			start = FNR
 			dash = indent
