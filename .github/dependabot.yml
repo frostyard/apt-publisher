@@ -1,0 +1,15 @@
+# Dependabot (frostyard/core ADR-0071 row B13). This repository has one
+# manifest that needs updates: the actions the workflows pin. Add 1 entry for
+# each other ecosystem with a manifest: "gomod" for go.mod, "npm" for
+# package.json, "cargo" for Cargo.toml, "docker" for a Dockerfile or
+# Containerfile.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
