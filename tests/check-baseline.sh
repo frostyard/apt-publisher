@@ -32,6 +32,7 @@ done
 # B2: the corrections inbox: one JSON object per line, 5 fields (ADR-0018).
 corrections=$ROOT/.memory/corrections.jsonl
 [[ -f $corrections ]] || fail ".memory/corrections.jsonl is missing"
+correction_lines=0
 while IFS= read -r line; do
 	[[ -n ${line//[[:space:]]/} ]] || continue
 	keys=$(printf '%s' "$line" |
@@ -39,6 +40,7 @@ while IFS= read -r line; do
 		fail ".memory/corrections.jsonl is not valid JSON: $line"
 	[[ $keys == correction,date,evidence,promoted_to,scope ]] ||
 		fail ".memory/corrections.jsonl needs exactly the fields correction, date, evidence, promoted_to, scope; got $keys"
+	correction_lines=$((correction_lines + 1))
 done <"$corrections"
 
 # B3: the docs shape (core ADR-0025): the index, the org ADR list and the 4
@@ -215,4 +217,4 @@ words=$(wc -w <"$ROOT/README.md")
 words=${words//[[:space:]]/}
 ((words <= 1000)) || fail "README.md has $words words; the limit is 1000"
 
-echo "ok - baseline"
+echo "ok - baseline: ${#workflow_files[@]} workflows, $correction_lines corrections lines, README $words words"
