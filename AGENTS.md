@@ -81,5 +81,8 @@ are pinned in `mise.toml`. Add a test to `tests/run.sh` for every new refusal
 or routing rule, and a case to `tests/check-baseline-test.sh` for every new
 rule in `tests/check-baseline.sh`: a guard needs a committed test that fails
 when the guard is reverted. A PR that touches a path in
-`.github/risk-paths.json` gets the `risk:high` label, and its body names each
-matched path and why the change is safe.
+`.github/risk-paths.json` gets the label of its strictest matched level
+(`level:L1` read every line, `level:L2` read the diff, `level:L3` skim,
+`level:L4` title and CI), and `risk:high` at L1 and L2; the workflow also
+removes `ready-for-human` when the head moves after the label (core ADR-0077,
+ADR-0078). Its body names each matched path and why the change is safe.

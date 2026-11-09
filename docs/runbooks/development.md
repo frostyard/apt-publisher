@@ -74,8 +74,9 @@ refusal or routing rule.
 
 The paths that can publish, sign, withdraw or handle secrets are on the risk
 path list in `.github/risk-paths.json`, so a pull request that touches one
-gets the `risk:high` label and its body names each matched path and why the
-change is safe.
+gets that entry's level label (`level:L1` read every line, `level:L2` read the
+diff, `level:L3` skim, `level:L4` title and CI), and `risk:high` at L1 and L2
+(core ADR-0078). Its body names each matched path and why the change is safe.
 
 - A change to a pinned tool (`mise.toml`, `mise.lock`) changes what the
   publisher runs. See [design/tool-behavior.md](../design/tool-behavior.md).
