@@ -356,8 +356,10 @@ risk_glob_split() { # risk_glob_split TEXT: sets risk_parts[] with the "/" split
 	risk_parts+=("$rest")
 }
 
-risk_glob_segment_re() { # risk_glob_segment_re SEGMENT: prints the ERE of 1
-	# segment that is not `**`; the escaped set is core's segmentPattern
+risk_glob_segment_re() { # risk_glob_segment_re SEGMENT: sets risk_glob_seg_re to
+	# the ERE of 1 segment that is not `**`. It sets a variable, not stdout: a
+	# command substitution would strip a trailing LF from the pattern, so a glob
+	# with a final newline would match 1 character less than core's does.
 	local seg=$1 out='' i c
 	for ((i = 0; i < ${#seg}; i++)); do
 		c=${seg:i:1}
@@ -370,7 +372,7 @@ risk_glob_segment_re() { # risk_glob_segment_re SEGMENT: prints the ERE of 1
 		*) out+=$c ;;
 		esac
 	done
-	printf '%s' "$out"
+	risk_glob_seg_re=$out
 }
 
 risk_glob_walk() { # risk_glob_walk GLOB_INDEX PATH_INDEX: 1 whole-segment match
@@ -408,7 +410,8 @@ risk_path_matches() { # risk_path_matches GLOB PATH: 0 when GLOB matches PATH
 			if [[ $seg == '**' ]]; then
 				risk_glob_re+=('**')
 			else
-				risk_glob_re+=("$(risk_glob_segment_re "$seg")")
+				risk_glob_segment_re "$seg"
+				risk_glob_re+=("$risk_glob_seg_re")
 			fi
 		done
 		risk_glob_split "$path"
@@ -432,9 +435,10 @@ jq -e . "$risk" >/dev/null 2>&1 || fail ".github/risk-paths.json is not valid JS
 unknown=$(jq -r '[keys[] | select(. != "schema_version" and
 	. != "default_level" and . != "paths")] | join(", ")' "$risk")
 [[ -z $unknown ]] || fail ".github/risk-paths.json has unknown key(s): $unknown"
-default_level=$(jq -r '.default_level // ""' "$risk")
-[[ $(jq -r '.default_level | type' "$risk") == string &&
-	$default_level =~ ^L[1-4]$ ]] ||
+# A command substitution would strip a trailing LF from the value, so the type
+# and the exact value are checked inside jq: "L3\n" is not L3.
+jq -e '.default_level | type == "string" and
+	(. == "L1" or . == "L2" or . == "L3" or . == "L4")' "$risk" >/dev/null ||
 	fail ".github/risk-paths.json must set default_level to L1, L2, L3 or L4"
 [[ $(jq -r '.paths | type' "$risk") == array ]] ||
 	fail ".github/risk-paths.json has no valid paths list"
@@ -446,28 +450,46 @@ unknown=$(jq -r '.paths[] | select(type == "object")
 	| select($extra != [])
 	| "\(.glob // "an entry"): unknown key(s): \($extra | join(", "))"' "$risk")
 [[ -z $unknown ]] || fail ".github/risk-paths.json: $unknown"
+# Each entry level is 1 of the 4 values exactly, read inside jq so a trailing LF
+# cannot pass. The count below also catches an entry that is not an object.
+unknown=$(jq -r '.paths[] | select(type == "object")
+	| (.level // "") as $l
+	| select(($l | type) != "string" or
+		($l != "L1" and $l != "L2" and $l != "L3" and $l != "L4"))
+	| "\(.glob // "an entry"): level must be L1, L2, L3 or L4, not \($l | tojson)"' "$risk")
+[[ -z $unknown ]] || fail ".github/risk-paths.json: $unknown"
 risk_checked=0
 while IFS=$'\t' read -r glob level; do
 	risk_checked=$((risk_checked + 1))
-	[[ $level =~ ^L[1-4]$ ]] ||
-		fail "${glob:-an entry}: level must be L1, L2, L3 or L4, not ${level:-none}"
 done < <(jq -r '.paths[] | select(type == "object") | [(.glob // ""), (.level // "")] | @tsv' "$risk")
 ((risk_checked == risk_count)) ||
 	fail ".github/risk-paths.json: checked $risk_checked of $risk_count entries"
-# Rule C: each glob that matches the list or the caller is L1 or L2.
+# Rule C: each glob that matches the list or the caller is L1 or L2, and each of
+# the 2 required paths has at least 1 glob that matches it. The count is kept for
+# each path, so 1 covered path cannot hide the other.
 required_paths=(.github/risk-paths.json .github/workflows/risk-paths.yml)
-rule_c_matches=0
+rule_c_covered=()
+for rule_c_i in "${!required_paths[@]}"; do
+	rule_c_covered[rule_c_i]=0
+done
 while IFS=$'\t' read -r glob level; do
-	for needed in "${required_paths[@]}"; do
+	for rule_c_i in "${!required_paths[@]}"; do
+		needed=${required_paths[rule_c_i]}
 		if risk_path_matches "$glob" "$needed"; then
-			rule_c_matches=$((rule_c_matches + 1))
+			rule_c_covered[rule_c_i]=$((rule_c_covered[rule_c_i] + 1))
 			[[ $level =~ ^L[12]$ ]] ||
 				fail "rule C: the glob $glob matches $needed; its level must be L1 or L2, not ${level:-none}"
 		fi
 	done
 done < <(jq -r '.paths[] | select(type == "object") | [(.glob // ""), (.level // "")] | @tsv' "$risk")
-((rule_c_matches > 0)) ||
-	fail "rule C: $rule_c_matches of ${#required_paths[@]} required paths match a glob in the list"
+rule_c_uncovered=''
+for rule_c_i in "${!required_paths[@]}"; do
+	if ((rule_c_covered[rule_c_i] == 0)); then
+		rule_c_uncovered+="${rule_c_uncovered:+, }${required_paths[rule_c_i]}"
+	fi
+done
+[[ -z $rule_c_uncovered ]] ||
+	fail "rule C: no glob in the list matches $rule_c_uncovered"
 
 for glob in '.github/workflows/**' 'scripts/**' 'config/**' 'keys/**' 'withdrawals/**'; do
 	[[ $(jq -r --arg g "$glob" '[.paths[].glob] | index($g) != null' "$risk") == true ]] ||
@@ -487,6 +509,9 @@ caller=$ROOT/.github/workflows/risk-paths.yml
 # the same LF line: a pin comment with a CR and a following `if: false` is 2 YAML
 # lines but 1 line to a check that splits on LF. The caller uses LF and nothing
 # else, so any of those characters fails before the text check reads a line.
+# $(<file) drops only trailing LF bytes, which YAML ignores at the end of a
+# file, so it cannot hide a line break; the guard below rejects every other
+# line-break character in the bytes that remain.
 caller_text=$(<"$caller")
 case $caller_text in
 *$'\r'*)

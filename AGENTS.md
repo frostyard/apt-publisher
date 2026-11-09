@@ -85,4 +85,7 @@ when the guard is reverted. A PR that touches a path in
 (`level:L1` read every line, `level:L2` read the diff, `level:L3` skim,
 `level:L4` title and CI), and `risk:high` at L1 and L2; the workflow also
 removes `ready-for-human` when the head moves after the label (core ADR-0077,
-ADR-0078). Its body names each matched path and why the change is safe.
+ADR-0078). A core org floor can raise the computed level above the entry's
+level, and a stricter level label that the PR already has stays (the ratchet);
+only the author lowers it, with the reason in the PR. Its body names each
+matched path and why the change is safe.
