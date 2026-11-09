@@ -736,7 +736,7 @@ run_tmpdir_guard() {
 # markers, so they test the function the check runs, not a copy. Each row is
 # glob, path, and 0 (match) or 1 (no match), as core's matchGlob answers.
 run_matcher_cases() {
-	local block row glob path want got
+	local block glob path want got
 	block=$(sed -n '/^# ---- risk-path glob (start) ----$/,/^# ---- risk-path glob (end) ----$/p' \
 		"$ROOT/tests/check-baseline.sh")
 	local -a rows=(
