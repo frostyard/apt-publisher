@@ -731,6 +731,48 @@ run_tmpdir_guard() {
 	printf 'ok %d - %s\n' "$cases" "$id"
 }
 
+# Direct cases for the glob matcher of tests/check-baseline.sh (a port of
+# core's matchGlob). They load only the block between its "risk-path glob"
+# markers, so they test the function the check runs, not a copy. Each row is
+# glob, path, and 0 (match) or 1 (no match), as core's matchGlob answers.
+run_matcher_cases() {
+	local block row glob path want got
+	block=$(sed -n '/^# ---- risk-path glob (start) ----$/,/^# ---- risk-path glob (end) ----$/p' \
+		"$ROOT/tests/check-baseline.sh")
+	local -a rows=(
+		$'a\n' a 1
+		a $'a\n' 1
+		$'a\n' $'a\n' 0
+		$'.github/risk-paths.json\n' .github/risk-paths.json 1
+		'a?b' $'a\xf0\x9f\x98\x80b' 0
+		'a??b' $'a\xf0\x9f\x98\x80b' 1
+		'**/x' /x 0
+		'a/**' a 0
+		'{a,b}/c' b/c 0
+		'*a' '*ba' 0
+	)
+	cases=$((cases + 1))
+	if [[ -z $block ]]; then
+		printf 'not ok %d - matcher_direct_cases: no risk-path glob block in the check\n' "$cases"
+		failures=$((failures + 1))
+		return 0
+	fi
+	local i bad=''
+	for ((i = 0; i < ${#rows[@]}; i += 3)); do
+		glob=${rows[i]} path=${rows[i + 1]} want=${rows[i + 2]}
+		if (eval "$block"; risk_path_matches "$glob" "$path"); then got=0; else got=1; fi
+		[[ $got == "$want" ]] || bad+="${bad:+; }$(printf '%q vs %q gave %s, want %s' "$glob" "$path" "$got" "$want")"
+	done
+	if [[ -n $bad ]]; then
+		printf 'not ok %d - matcher_direct_cases: %s\n' "$cases" "$bad"
+		failures=$((failures + 1))
+		return 0
+	fi
+	printf 'ok %d - matcher_direct_cases (%d rows)\n' "$cases" $((${#rows[@]} / 3))
+}
+
+run_matcher_cases
+
 run_tmpdir_guard
 
 printf '1..%d\n' "$cases"
