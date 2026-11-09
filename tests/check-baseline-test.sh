@@ -85,6 +85,26 @@ run_case() { # run_case CASE [EXPECTED]: a case name and a needed stderr line
 	printf 'ok %d - %s\n' "$cases" "$id"
 }
 
+run_ok_case() { # run_ok_case CASE: a case that mutates the tree and must pass
+	local id=$1 dir=$work/ok-$1 orig=$work/orig-ok-$1 err
+	cases=$((cases + 1))
+	copy_tree "$orig"
+	mkdir -p "$dir"
+	cp -a "$orig/." "$dir"
+	if ! "mut_$id" "$dir" "$orig"; then
+		printf 'not ok %d - %s: the mutation did not change the tree\n' "$cases" "$id"
+		failures=$((failures + 1))
+		return 0
+	fi
+	if err=$("$dir/tests/check-baseline.sh" 2>&1 >/dev/null); then
+		printf 'ok %d - %s\n' "$cases" "$id"
+		return 0
+	fi
+	printf 'not ok %d - %s: the check failed on the mutated tree\n' "$cases" "$id"
+	printf '  %s\n' "${err//$'\n'/$'\n'  }"
+	failures=$((failures + 1))
+}
+
 # B1: the instruction-file symlinks.
 mut_b1_remove_gemini() {
 	rm -f "$1/GEMINI.md"
@@ -246,17 +266,226 @@ mut_b6_no_scripts_glob() {
 	changed "$2" "$1" .github/risk-paths.json
 }
 
-# The unpinned caller ref: the B5 pin scan reports it before B6 reads it.
-mut_b6_caller_main() {
-	sed -i 's|@1b02a129026329cef2b46d1fbd0465a863c1cd81|@main|' "$1/.github/workflows/risk-paths.yml"
+# The list in schema version 1: version 2 is the contract (core ADR-0078).
+mut_b6_list_v1() {
+	jq '.schema_version = 1 | del(.default_level) | .paths |= map(del(.level))' \
+		"$1/.github/risk-paths.json" >"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# An entry with no level, in an otherwise valid version 2 list.
+mut_b6_missing_level() {
+	jq '(.paths[] | select(.glob == "scripts/**")) |= del(.level)' \
+		"$1/.github/risk-paths.json" >"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# A default level outside L1 to L4.
+mut_b6_bad_default_level() {
+	jq '.default_level = "L5"' "$1/.github/risk-paths.json" \
+		>"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+mut_b6_default_level_newline() { # a trailing LF is not part of the level value
+	jq '.default_level = "L3\n"' "$1/.github/risk-paths.json" \
+		>"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+mut_b6_entry_level_newline() { # a trailing LF is not part of the level value
+	jq '.paths[0].level = "L2\n"' "$1/.github/risk-paths.json" \
+		>"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# Rule C: the caller needs a glob that matches it, not just the list.
+mut_b6_no_caller_glob() {
+	jq '.paths |= map(select(.glob != ".github/workflows/**"))' "$1/.github/risk-paths.json" \
+		>"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# Rule C: the list needs a glob that matches it (its own entry).
+mut_b6_no_self_entry() {
+	jq '.paths |= map(select(.glob != ".github/risk-paths.json"))' "$1/.github/risk-paths.json" \
+		>"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# Rule C: the glob that matches the list itself must be L1 or L2.
+mut_b6_self_glob_l3() {
+	jq '(.paths[] | select(.glob == ".github/risk-paths.json")).level = "L3"' \
+		"$1/.github/risk-paths.json" >"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# Rule C: the glob that matches the caller workflow must be L1 or L2.
+mut_b6_caller_glob_l3() {
+	jq '(.paths[] | select(.glob == ".github/workflows/**")).level = "L3"' \
+		"$1/.github/risk-paths.json" >"$1/.github/risk-paths.json.new"
+	mv "$1/.github/risk-paths.json.new" "$1/.github/risk-paths.json"
+	changed "$2" "$1" .github/risk-paths.json
+}
+
+# B6 caller: the caller workflow has 1 allowed shape, so each case changes 1
+# part of the shipped file. The pin is read from that file, so a core pin update
+# does not disarm a case.
+caller_pin() { # caller_pin DIR: the 40-hex core commit in the copied caller
+	sed -nE 's|^    uses: frostyard/core/\.github/workflows/pr-triage\.yml@([0-9a-f]{40}).*|\1|p' \
+		"$1/.github/workflows/risk-paths.yml"
+}
+
+# The pin under another job name: the job key itself is part of the shape.
+mut_b6_caller_other_job() {
+	sed -i 's/^  pr-triage:$/  other:/' "$1/.github/workflows/risk-paths.yml"
 	changed "$2" "$1" .github/workflows/risk-paths.yml
 }
 
-# A pinned SHA of the wrong workflow: only B6 can catch this one.
+# The older core risk-paths caller at the same 40-character SHA.
 mut_b6_caller_wrong_workflow() {
-	sed -i 's|risk-paths\.yml@1b02a129026329cef2b46d1fbd0465a863c1cd81|other.yml@1b02a129026329cef2b46d1fbd0465a863c1cd81|' \
+	sed -i 's|pr-triage\.yml@|risk-paths.yml@|' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# A short SHA: the B5 pin scan reports it before B6 reads the body.
+mut_b6_caller_short_sha() {
+	local sha
+	sha=$(caller_pin "$1")
+	sed -i "s|@$sha|@${sha:0:7}|" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# The unpinned ref: also the B5 pin scan.
+mut_b6_caller_main() {
+	local sha
+	sha=$(caller_pin "$1")
+	sed -i "s|@$sha|@main|" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# `labeled` is what re-runs the job when a label changes.
+mut_b6_caller_no_labeled() {
+	sed -i 's/, labeled\]/]/' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# A commented-out permission is not a permission; the line itself must be there.
+mut_b6_caller_commented_permission() {
+	sed -i 's/^      pull-requests: write$/      # pull-requests: write/' \
 		"$1/.github/workflows/risk-paths.yml"
 	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# The job holds exactly 2 permissions.
+mut_b6_caller_extra_permission() {
+	sed -i '/^      contents: read$/a\      actions: read' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# No merge_group trigger: it cannot run from a merge queue.
+mut_b6_caller_merge_group() {
+	sed -i '/^    types: \[opened/a\  merge_group:' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# The job holds no other key.
+mut_b6_caller_extra_line() {
+	sed -i '/^  pr-triage:$/a\    name: triage' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# Valid variants: another 40-character SHA, another trailing comment, and
+# comment lines with a blank line above the body.
+mut_b6_caller_other_sha_comment_ok() {
+	local sha
+	sha=$(caller_pin "$1")
+	sed -i "s|@$sha # .*|@0000000000000000000000000000000000000000 # frostyard/core, 2026-11-10|" \
+		"$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+mut_b6_caller_leading_comments_ok() {
+	printf '# a note about this caller\n\n# and a second note\n' |
+		cat - "$1/.github/workflows/risk-paths.yml" >"$1/.github/workflows/risk-paths.yml.new"
+	mv "$1/.github/workflows/risk-paths.yml.new" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# YAML reads a bare CR, NEL, LS and PS as line breaks, so a key can hide in the
+# same LF line. Any of them fails before the text check reads a line.
+mut_b6_caller_cr_in_pin_comment() {
+	awk '/^    uses:/ { printf "%s\r    if: false\n", $0; next } { print }' \
+		"$1/.github/workflows/risk-paths.yml" >"$1/.github/workflows/risk-paths.yml.new"
+	mv "$1/.github/workflows/risk-paths.yml.new" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+mut_b6_caller_cr_in_header() {
+	printf '# a header note\rname: not the body\n' |
+		cat - "$1/.github/workflows/risk-paths.yml" >"$1/.github/workflows/risk-paths.yml.new"
+	mv "$1/.github/workflows/risk-paths.yml.new" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+mut_b6_caller_nel_in_pin_comment() {
+	awk '/^    uses:/ { printf "%s\302\205    if: false\n", $0; next } { print }' \
+		"$1/.github/workflows/risk-paths.yml" >"$1/.github/workflows/risk-paths.yml.new"
+	mv "$1/.github/workflows/risk-paths.yml.new" "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# Rule C: each glob that matches the list or the caller is L1 or L2. Each case
+# adds 1 more entry next to the valid ones, so the new entry alone decides.
+risk_add() { # risk_add DIR ORIG GLOB LEVEL: appends 1 entry to the list
+	local dir=$1 orig=$2
+	jq --arg g "$3" --arg l "$4" \
+		'.paths += [{glob: $g, level: $l, why: "governance: a rule C fixture"}]' \
+		"$dir/.github/risk-paths.json" >"$dir/.github/risk-paths.json.new"
+	mv "$dir/.github/risk-paths.json.new" "$dir/.github/risk-paths.json"
+	changed "$orig" "$dir" .github/risk-paths.json
+}
+
+mut_b6_glob_q_caller_l3() { # .github/workflows/risk-paths.ym? matches the caller
+	risk_add "$1" "$2" '.github/workflows/risk-paths.ym?' L3
+}
+
+mut_b6_glob_deep_list_l3() { # **/.github/risk-paths.json matches the list
+	risk_add "$1" "$2" '**/.github/risk-paths.json' L3
+}
+
+mut_b6_glob_brace_list_l3() { # 1 brace alternative matches the list
+	risk_add "$1" "$2" '.github/{risk-paths.jso?,unused}' L3
+}
+
+mut_b6_glob_brace_slash_caller_l3() { # a brace alternative holds a /
+	risk_add "$1" "$2" '.github/{workflows/risk-paths.yml,unused}' L3
+}
+
+mut_b6_glob_brace_slash_list_l3() { # a brace alternative holds a /
+	risk_add "$1" "$2" '{.github/risk-paths.json,unused}' L3
+}
+
+# The other direction: core's matchGlob does not match these, so the list is
+# valid. A matcher that is too eager fails here.
+mut_b6_glob_one_alternative_ok() { # 1 brace alternative is malformed
+	risk_add "$1" "$2" '.github/risk-paths{.json}' L3
+}
+
+mut_b6_glob_empty_alternative_ok() { # an empty brace alternative is malformed
+	risk_add "$1" "$2" '.github/risk-paths{.json,}' L3
+}
+
+mut_b6_glob_trailing_star_ok() { # **/ needs a final empty segment
+	risk_add "$1" "$2" '**/' L3
 }
 
 # B7: the pull request template.
@@ -343,9 +572,33 @@ order=(
 	b5_permissions_write_all
 	b5_permissions_write_scope
 	b6_no_risk_json
+	b6_no_self_entry
 	b6_no_scripts_glob
-	b6_caller_main
+	b6_list_v1
+	b6_missing_level
+	b6_bad_default_level
+	b6_self_glob_l3
+	b6_caller_glob_l3
+	b6_default_level_newline
+	b6_entry_level_newline
+	b6_no_caller_glob
+	b6_glob_q_caller_l3
+	b6_glob_deep_list_l3
+	b6_glob_brace_list_l3
+	b6_glob_brace_slash_caller_l3
+	b6_glob_brace_slash_list_l3
+	b6_caller_other_job
 	b6_caller_wrong_workflow
+	b6_caller_short_sha
+	b6_caller_main
+	b6_caller_no_labeled
+	b6_caller_commented_permission
+	b6_caller_extra_permission
+	b6_caller_merge_group
+	b6_caller_extra_line
+	b6_caller_cr_in_pin_comment
+	b6_caller_cr_in_header
+	b6_caller_nel_in_pin_comment
 	b7_rename_risk_heading
 	b12_no_make_ci
 	b13_no_github_actions
@@ -355,6 +608,15 @@ order=(
 	b16_claude_other_file
 	b17_duplicate_marker
 	b17_long_readme
+)
+
+# Cases that mutate the tree and must pass.
+ok_order=(
+	b6_caller_other_sha_comment_ok
+	b6_caller_leading_comments_ok
+	b6_glob_one_alternative_ok
+	b6_glob_empty_alternative_ok
+	b6_glob_trailing_star_ok
 )
 
 declare -A expected=(
@@ -382,10 +644,34 @@ declare -A expected=(
 	[b5_first_step_missing_persist]='.github/workflows/fixture.yml:16: the checkout step does not set persist-credentials: false'
 	[b5_permissions_write_all]='the permissions line must be permissions: {} or a block of read scopes'
 	[b5_permissions_write_scope]='the permissions block holds a scope that is not read'
+	[b6_no_self_entry]='rule C: no glob in the list matches .github/risk-paths.json'
 	[b6_no_risk_json]='.github/risk-paths.json is missing'
 	[b6_no_scripts_glob]='does not list the glob scripts/**'
+	[b6_list_v1]='.github/risk-paths.json must set schema_version 2'
+	[b6_missing_level]='scripts/**: level must be L1, L2, L3 or L4'
+	[b6_bad_default_level]='.github/risk-paths.json must set default_level to L1, L2, L3 or L4'
+	[b6_self_glob_l3]='rule C: the glob .github/risk-paths.json matches .github/risk-paths.json'
+	[b6_default_level_newline]='.github/risk-paths.json must set default_level to L1, L2, L3 or L4'
+	[b6_entry_level_newline]="level must be L1, L2, L3 or L4, not \"L2\n\""
+	[b6_no_caller_glob]='rule C: no glob in the list matches .github/workflows/risk-paths.yml'
+	[b6_caller_glob_l3]='rule C: the glob .github/workflows/** matches .github/workflows/risk-paths.yml'
+	[b6_glob_q_caller_l3]='rule C: the glob .github/workflows/risk-paths.ym? matches .github/workflows/risk-paths.yml'
+	[b6_glob_deep_list_l3]='rule C: the glob **/.github/risk-paths.json matches .github/risk-paths.json'
+	[b6_glob_brace_list_l3]='rule C: the glob .github/{risk-paths.jso?,unused} matches .github/risk-paths.json'
+	[b6_glob_brace_slash_caller_l3]='rule C: the glob .github/{workflows/risk-paths.yml,unused} matches .github/workflows/risk-paths.yml'
+	[b6_glob_brace_slash_list_l3]='rule C: the glob {.github/risk-paths.json,unused} matches .github/risk-paths.json'
+	[b6_caller_other_job]="expected '  pr-triage:', found '  other:'"
+	[b6_caller_short_sha]='uses is not pinned to a 40-character commit SHA'
+	[b6_caller_no_labeled]="expected '    types: [opened, synchronize, reopened, edited, labeled]'"
+	[b6_caller_commented_permission]="expected '      pull-requests: write', found '      # pull-requests: write'"
+	[b6_caller_extra_permission]="expected '      pull-requests: write', found '      actions: read'"
+	[b6_caller_merge_group]="expected '<blank>', found '  merge_group:'"
+	[b6_caller_cr_in_pin_comment]='holds a CR (U+000D)'
+	[b6_caller_cr_in_header]='holds a CR (U+000D)'
+	[b6_caller_nel_in_pin_comment]='holds a NEL (U+0085)'
+	[b6_caller_extra_line]="expected '    permissions:', found '    name: triage'"
 	[b6_caller_main]='uses is not pinned to a 40-character commit SHA'
-	[b6_caller_wrong_workflow]="no workflow calls frostyard/core's risk-paths.yml"
+	[b6_caller_wrong_workflow]="expected '    uses: frostyard/core/.github/workflows/pr-triage.yml@<40 hex>'"
 	[b7_rename_risk_heading]='has no heading that names the risk tier'
 	[b12_no_make_ci]='has no run: make ci step'
 	[b13_no_github_actions]='has no github-actions entry'
@@ -399,6 +685,10 @@ declare -A expected=(
 
 for id in "${order[@]}"; do
 	run_case "$id" "${expected[$id]-}"
+done
+
+for id in "${ok_order[@]}"; do
+	run_ok_case "$id"
 done
 
 # The guard against a work directory inside the repository, tested on a
@@ -440,6 +730,48 @@ run_tmpdir_guard() {
 	fi
 	printf 'ok %d - %s\n' "$cases" "$id"
 }
+
+# Direct cases for the glob matcher of tests/check-baseline.sh (a port of
+# core's matchGlob). They load only the block between its "risk-path glob"
+# markers, so they test the function the check runs, not a copy. Each row is
+# glob, path, and 0 (match) or 1 (no match), as core's matchGlob answers.
+run_matcher_cases() {
+	local block glob path want got
+	block=$(sed -n '/^# ---- risk-path glob (start) ----$/,/^# ---- risk-path glob (end) ----$/p' \
+		"$ROOT/tests/check-baseline.sh")
+	local -a rows=(
+		$'a\n' a 1
+		a $'a\n' 1
+		$'a\n' $'a\n' 0
+		$'.github/risk-paths.json\n' .github/risk-paths.json 1
+		'a?b' $'a\xf0\x9f\x98\x80b' 0
+		'a??b' $'a\xf0\x9f\x98\x80b' 1
+		'**/x' /x 0
+		'a/**' a 0
+		'{a,b}/c' b/c 0
+		'*a' '*ba' 0
+	)
+	cases=$((cases + 1))
+	if [[ -z $block ]]; then
+		printf 'not ok %d - matcher_direct_cases: no risk-path glob block in the check\n' "$cases"
+		failures=$((failures + 1))
+		return 0
+	fi
+	local i bad=''
+	for ((i = 0; i < ${#rows[@]}; i += 3)); do
+		glob=${rows[i]} path=${rows[i + 1]} want=${rows[i + 2]}
+		if (eval "$block"; risk_path_matches "$glob" "$path"); then got=0; else got=1; fi
+		[[ $got == "$want" ]] || bad+="${bad:+; }$(printf '%q vs %q gave %s, want %s' "$glob" "$path" "$got" "$want")"
+	done
+	if [[ -n $bad ]]; then
+		printf 'not ok %d - matcher_direct_cases: %s\n' "$cases" "$bad"
+		failures=$((failures + 1))
+		return 0
+	fi
+	printf 'ok %d - matcher_direct_cases (%d rows)\n' "$cases" $((${#rows[@]} / 3))
+}
+
+run_matcher_cases
 
 run_tmpdir_guard
 

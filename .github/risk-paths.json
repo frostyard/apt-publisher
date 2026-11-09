@@ -1,52 +1,65 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "default_level": "L3",
   "paths": [
     {
       "glob": ".github/risk-paths.json",
+      "level": "L2",
       "why": "governance: the high-risk path list itself"
     },
     {
       "glob": ".github/workflows/**",
+      "level": "L1",
       "why": "publication: the writer workflows publish, withdraw, rollback, move and import-stable, the secrets check, CI and the risk-paths caller, plus their token permissions"
     },
     {
       "glob": ".github/actionlint.yaml",
+      "level": "L2",
       "why": "governance: the gate configuration; it decides which workflow errors the lint step ignores"
     },
     {
       "glob": ".shellcheckrc",
+      "level": "L2",
       "why": "governance: the gate configuration; it decides how shellcheck reads the scripts"
     },
     {
       "glob": "scripts/**",
+      "level": "L1",
       "why": "publication: publishing, signing, verification, withdrawal and secret handling: the policy of the single writer"
     },
     {
       "glob": "config/**",
+      "level": "L1",
       "why": "publication: who may publish which package names, the codenames and components, the buckets and the signing key fingerprint"
     },
     {
       "glob": "keys/**",
+      "level": "L1",
       "why": "signing and keys: the published signing keyring, which hosts install as their trust anchor"
     },
     {
       "glob": "withdrawals/**",
+      "level": "L1",
       "why": "destructive operations: batch files that withdraw published packages when the withdraw workflow runs them"
     },
     {
       "glob": "tests/**",
+      "level": "L2",
       "why": "governance: the gate's checks of the single-writer invariants, including the end-to-end publication test"
     },
     {
       "glob": "Makefile",
+      "level": "L2",
       "why": "governance: the verify gate"
     },
     {
       "glob": "mise.toml",
+      "level": "L2",
       "why": "governance: the tool pins that CI installs"
     },
     {
       "glob": "mise.lock",
+      "level": "L2",
       "why": "governance: the checksums of the tools that CI installs"
     }
   ]
