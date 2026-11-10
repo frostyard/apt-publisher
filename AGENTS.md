@@ -22,6 +22,9 @@ the signing workflow and ref that an attested producer names.
 - An attested producer's column 4 names its signing workflow and ref;
   `fetch-release.sh` passes `--signer-workflow` and `--source-ref` for every
   `.deb`. `yes` is not a valid value (ADR-0004).
+- aptly publish calls that reach R2 go through `aptly_publish_retry`. Retry
+  only the transient class on the `ERROR: unable to publish:` line; never
+  wrap `publish source add/update`.
 - Nothing deletes pool files. Keep `-skip-cleanup` on every switch; deletion
   would be a separate, explicit decision.
 - `reconcile_state` must run before any change in every path that can
