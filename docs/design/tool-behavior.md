@@ -20,6 +20,19 @@ pinned version changes (`mise.toml`, `mise.lock`).
 
 - It reads a local pool file only when a snapshot references a package the
   bucket lacks, so an object with the same MD5 is skipped.
+- `publish switch`, `publish update` and `publish snapshot` call `Publish`
+  before they update or add the publication in the database. A failed
+  `Publish` leaves that database entry unchanged. For `publish update`, the
+  staged source revision stays in the database.
+- A failed `Publish` prints `ERROR: unable to publish:` on stderr and exits
+  1. Retry only transient R2 errors on that line. Errors before `Publish`
+  (`unable to switch:`, `unable to update:`, signer initialization) and
+  after it (`unable to save to DB:`) must not retry.
+- aptly writes indexes with a `.tmp` suffix, then renames them at the end.
+  Pool uploads skip objects with the same MD5. Repeating the same publish
+  command with the same snapshots converges, as pending-marker recovery
+  does. `publish source add/update` change the database before publication;
+  repeating the whole staging path is not safe.
 - S3 uploads are a single `PutObject` with `Md5` metadata. That is why
   `verify --deep` can trust the R2 ETag as the MD5.
 - A database-only state (no pool) broke the import-then-publish flow and
@@ -40,6 +53,9 @@ pinned version changes (`mise.toml`, `mise.lock`).
   deletes unreferenced files under `pool/main` at the prefix.
 
 ### rclone 1.71.1
+
+- rclone already retries: defaults are `--retries 3` and
+  `--low-level-retries 10`. The aptly retry helper does not wrap rclone.
 
 - `rclone serve s3` quirks (tests only): it livelocks intermittently with
   `--dir-cache-time 0s`, so keep the default; auth keys `AK,SK` were

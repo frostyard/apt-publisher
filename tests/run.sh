@@ -32,6 +32,7 @@ trap cleanup EXIT
 
 # The canary tests run without the pause between tries.
 export APT_CANARY_DELAY=0
+export APT_PUBLISH_RETRY_DELAYS='0 0'
 
 n=0
 ok() {
@@ -294,6 +295,33 @@ EOF
 chmod +x "$tmp/shim-repolist/aptly" "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh" "$tmp/shim-aptly/aptly"
 mkdir -p "$tmp/gh"
 
+# Fail only the R2 publish commands, before the real aptly changes anything.
+mkdir -p "$tmp/shim-publish"
+cat >"$tmp/shim-publish/aptly" <<EOF
+#!/usr/bin/env bash
+if [[ \$2 == publish && \$3 =~ ^(switch|update|snapshot)\$ ]]; then
+	count=\$(( \$(cat "\$SHIM_PUBLISH_COUNT" 2>/dev/null || echo 0) + 1 ))
+	echo "\$count" >"\$SHIM_PUBLISH_COUNT"
+	printf '%s\\n' "\$3" >>"\$SHIM_PUBLISH_COUNT.commands"
+	if ((count <= SHIM_PUBLISH_FAILURES)); then
+		printf '%s\\n' "\$SHIM_PUBLISH_ERROR" >&2
+		exit "\$SHIM_PUBLISH_STATUS"
+	fi
+fi
+exec "$real_aptly" "\$@"
+EOF
+chmod +x "$tmp/shim-publish/aptly"
+# retry_publish FAILURES ERROR STATUS SCRIPT ARGS... resets the call counter.
+retry_publish() {
+	rm -f "$tmp/publish-count" "$tmp/publish-count.commands"
+	local failures=$1 error=$2 status=$3
+	shift 3
+	env PATH="$tmp/shim-publish:$PATH" SHIM_PUBLISH_COUNT="$tmp/publish-count" \
+		SHIM_PUBLISH_FAILURES="$failures" SHIM_PUBLISH_ERROR="$error" SHIM_PUBLISH_STATUS="$status" \
+		APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" "$ROOT/scripts/$1" "${@:2}"
+}
+retry_lines() { grep -c '^transient R2 error in aptly publish ' "$tmp/err" || true; }
+
 # --- dry run ------------------------------------------------------------------
 
 # The committed configuration publishes both components (core ADR-0059);
@@ -497,12 +525,128 @@ must_fail "a signing failure aborts the publish" "unable to" \
 	env APT_SIGNING_KEY_FPR=0000000000000000000000000000000000000000 \
 	APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$tmp/updex-signfail" --codenames trixie
+check "a signing failure has no publish retry" test "$(retry_lines)" = 0
 check "the failed publish left InRelease unchanged" test "$(inrelease trixie)" = "$before"
 mkdeb "$tmp/bootc-next" bootc '1.16.9-1~deb13' amd64
 must_pass "the next producer's run drops the stale pending marker" \
 	run publish.sh --producer frostyard/bootc-debian --debs "$tmp/bootc-next"
 check "the next run publishes its own package" listed trixie bootc '1.16.9-1~deb13'
 check "the next run also publishes the stranded package" listed trixie frostyard-updex 2.0.4
+
+# --- bounded retries of transient R2 publication errors -------------------------------
+
+scope publishretry
+r2_500='ERROR: unable to publish: unable to process packages: error caching paths under prefix: failed to get page 1: operation error S3: ListObjectsV2, exceeded maximum number of attempts, 3, https response error StatusCode: 500, RequestID: , HostID: , api error InternalError: We encountered an internal error. Please try again.'
+# Exercise each marker and the same-line/4xx guards independently of S3.
+transient_markers=('StatusCode: 503' 'exceeded maximum number of attempts' 'i/o timeout'
+	'context deadline exceeded' 'TLS handshake timeout' 'connection reset by peer')
+classify_retry() {
+	# shellcheck disable=SC2016 # The child shell expands its own arguments.
+	bash -c 'source "$1/scripts/lib.sh"; r2_transient "$2"' _ "$ROOT" "$tmp/retry-error"
+}
+for marker in "${transient_markers[@]}"; do
+	printf 'ERROR: unable to publish: %s\n' "$marker" >"$tmp/retry-error"
+	check "the transient classifier accepts $marker" classify_retry
+done
+# Replace only aptly and sleep to check the default budget without waiting.
+retry_probe() {
+	# shellcheck disable=SC2016 # The child shell expands its own arguments.
+	bash -c '
+		source "$1/scripts/lib.sh"
+		error=$2 sleeps=$3
+		aptly_() { printf "%s\n" "$error" >&2; return 3; }
+		sleep() { printf "%s\n" "$1" >>"$sleeps"; }
+		aptly_publish_retry switch
+	' _ "$ROOT" "$r2_500" "$tmp/retry-sleeps"
+}
+unset APT_PUBLISH_RETRY_DELAYS
+status=0
+retry_probe >"$tmp/out" 2>"$tmp/err" || status=$?
+check "the default publish retry budget preserves the final status" test "$status" = 3
+check "the default publish retry delays are 10 and 30 seconds" \
+	test "$(paste -sd, "$tmp/retry-sleeps")" = 10,30
+check "the default publish retry budget logs two retries" test "$(retry_lines)" = 2
+export APT_PUBLISH_RETRY_DELAYS='0 0'
+mkdeb "$tmp/retry-old" trixie-thing 1.0 amd64
+mkdeb "$tmp/retry-next" trixie-thing 1.1 amd64
+must_pass "a first publication retries a transient R2 error" \
+	retry_publish 1 "$r2_500" 1 publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-old"
+check "the first publication uses snapshot twice" \
+	test "$(paste -sd, "$tmp/publish-count.commands")" = snapshot,snapshot
+check "the first publication logs one retry" test "$(retry_lines)" = 1
+check "the retried first publication lists its package" listed trixie trixie-thing 1.0
+must_pass "a switch survives two transient R2 errors" \
+	retry_publish 2 "$r2_500" 1 publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-next"
+check "the switch uses three identical publish subcommands" \
+	test "$(paste -sd, "$tmp/publish-count.commands")" = switch,switch,switch
+check "the switch logs exactly two retries" test "$(retry_lines)" = 2
+check "the retried switch lists its package" listed trixie trixie-thing 1.1
+
+# Use the image configuration only for this run; later scenarios remain main-only.
+export APT_CODENAMES_FILE=$tmp/codenames-image.tsv
+must_pass "publish update survives a transient R2 error" \
+	retry_publish 1 "$r2_500" 1 publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-next"
+check "the component addition retries only update" \
+	test "$(paste -sd, "$tmp/publish-count.commands")" = update,update
+check "publish update logs exactly one retry" test "$(retry_lines)" = 1
+check "the retried update adds image" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
+check "the retried update preserves the package" listed trixie trixie-thing 1.1
+export APT_CODENAMES_FILE=$tmp/codenames-main.tsv
+
+# A transient marker must be on the Publish error line, never on a DB,
+# validation or signer error. A 4xx wins even when attempts were exhausted.
+refusal_errors=(
+	'ERROR: unable to publish: exceeded maximum number of attempts, StatusCode: 403 AccessDenied'
+	'ERROR: unable to publish: exceeded maximum number of attempts, StatusCode: 429 TooManyRequests'
+	'ERROR: unable to publish: unable to sign'
+	'ERROR: unable to save to DB: StatusCode: 500'
+	'ERROR: unable to switch: StatusCode: 500'
+	$'ERROR: unable to publish: unable to sign\nStatusCode: 500'
+	'prefix ERROR: unable to publish: StatusCode: 500'
+)
+for i in "${!refusal_errors[@]}"; do
+	scope "retrynontransient$i"
+	status=0
+	retry_publish 1 "${refusal_errors[i]}" 1 publish.sh --producer frostyard/trixie-only \
+		--debs "$tmp/retry-old" >"$tmp/out" 2>"$tmp/err" || status=$?
+	check "non-transient case $i preserves exit code 1" test "$status" = 1
+	check "non-transient case $i makes one publish call" test "$(cat "$tmp/publish-count")" = 1
+	check "non-transient case $i logs no retry" test "$(retry_lines)" = 0
+done
+
+scope retryexhausted
+must_pass "prepare a publication for retry exhaustion" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-old"
+before=$(inrelease trixie)
+status=0
+retry_publish 3 "$r2_500" 3 publish.sh --producer frostyard/trixie-only \
+	--debs "$tmp/retry-next" >"$tmp/out" 2>"$tmp/err" || status=$?
+check "exhausted retries preserve exit code 3" test "$status" = 3
+check "exhausted retries make exactly three calls" test "$(cat "$tmp/publish-count")" = 3
+check "exhausted retries log exactly two retries" test "$(retry_lines)" = 2
+check "exhausted retries keep the pending marker" \
+	test -f "$tmp/s3/frostyard-apt-state/retryexhausted/txn/pending-trixie"
+check "exhausted retries leave InRelease unchanged" test "$(inrelease trixie)" = "$before"
+must_pass "a normal run recovers after retry exhaustion" \
+	run publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-next"
+check "recovery publishes the stranded package" listed trixie trixie-thing 1.1
+check "recovery clears the pending marker" \
+	test ! -e "$tmp/s3/frostyard-apt-state/retryexhausted/txn/pending-trixie"
+
+scope retrydisabled
+export APT_PUBLISH_RETRY_DELAYS=''
+status=0
+retry_publish 1 "$r2_500" 3 publish.sh --producer frostyard/trixie-only \
+	--debs "$tmp/retry-old" >"$tmp/out" 2>"$tmp/err" || status=$?
+check "empty delays disable retries and preserve the exit code" test "$status" = 3
+check "empty delays make one publish call" test "$(cat "$tmp/publish-count")" = 1
+check "empty delays log no retry" test "$(retry_lines)" = 0
+export APT_PUBLISH_RETRY_DELAYS='0 0'
+scope retryinvalid
+must_fail "invalid publish retry delays are refused" 'APT_PUBLISH_RETRY_DELAYS must contain only non-negative integers' \
+	env APT_PUBLISH_RETRY_DELAYS=ten APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/retry-old"
+scope debian
 
 # --- point-in-time rollback -------------------------------------------------------------
 

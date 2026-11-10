@@ -148,6 +148,44 @@ r2_env() {
 
 aptly_() { aptly -config="$APTLY_CONF" "$@"; }
 
+# Only Publish errors leave aptly's publication database unchanged. Match the
+# transient marker on that error line, and never retry a 4xx (including 429).
+r2_transient() {
+	awk '
+		/^ERROR: unable to publish:/ && !/StatusCode: 4[0-9][0-9]/ &&
+		/StatusCode: 5[0-9][0-9]|exceeded maximum number of attempts|i\/o timeout|context deadline exceeded|TLS handshake timeout|connection reset by peer/ { found = 1 }
+		END { exit !found }' "$1"
+}
+
+# aptly_publish_retry SUBCOMMAND ARGS... repeats only the R2 publication,
+# never source staging. aptly prints its ERROR line on stderr: stderr is kept
+# for the classifier and then copied to stderr; stdout passes through. The
+# subshell keeps its temporary-file trap local.
+aptly_publish_retry() (
+	local settings=${APT_PUBLISH_RETRY_DELAYS-10 30} delay output status attempt=1 total
+	local -a delays=()
+	settings=${settings//$'\n'/ }
+	IFS=$' \t' read -r -a delays <<<"$settings"
+	for delay in "${delays[@]}"; do
+		[[ $delay =~ ^[0-9]+$ ]] || die "APT_PUBLISH_RETRY_DELAYS must contain only non-negative integers (got: $delay)"
+	done
+	total=$((${#delays[@]} + 1))
+	output=$(mktemp)
+	trap 'rm -f -- "$output"' EXIT
+	while :; do
+		if aptly_ publish "$@" 2>"$output"; then status=0; else status=$?; fi
+		cat "$output" >&2
+		((status != 0)) || return 0
+		if ((attempt >= total)) || ! r2_transient "$output"; then
+			return "$status"
+		fi
+		delay=${delays[attempt - 1]}
+		log "transient R2 error in aptly publish $1 (try $attempt of $total); retrying in ${delay}s"
+		sleep "$delay"
+		attempt=$((attempt + 1))
+	done
+)
+
 # aptly_init writes aptly.conf and restores aptly's state from the state
 # bucket. Every mutating script starts here, as if on a fresh runner.
 aptly_init() {
@@ -714,7 +752,7 @@ publish_snapshot() {
 		if ((${#absent[@]} == 0)); then
 			csv=$(IFS=,; printf '%s' "${comps[*]}")
 			log "switching $codename to ${snaps[*]}"
-			aptly_ publish switch "${common[@]}" "-component=$csv" "${extra[@]}" -skip-cleanup \
+			aptly_publish_retry switch "${common[@]}" "-component=$csv" "${extra[@]}" -skip-cleanup \
 				"$codename" "$APT_TARGET" "${snaps[@]}" >&2
 			return 0
 		fi
@@ -733,7 +771,7 @@ publish_snapshot() {
 			aptly_ publish source update "-component=$csv_present" "-prefix=$APT_TARGET" \
 				"$codename" "${there_snaps[@]}" >&2
 		fi
-		aptly_ publish update "${common[@]}" "${extra[@]}" -skip-cleanup \
+		aptly_publish_retry update "${common[@]}" "${extra[@]}" -skip-cleanup \
 			"$codename" "$APT_TARGET" >&2
 		return 0
 	fi
@@ -747,7 +785,7 @@ publish_snapshot() {
 	done
 	csv=$(IFS=,; printf '%s' "${configured[*]}")
 	log "first publication of $codename from ${ordered[*]}"
-	aptly_ publish snapshot "${common[@]}" "-component=$csv" "${extra[@]}" -acquire-by-hash \
+	aptly_publish_retry snapshot "${common[@]}" "-component=$csv" "${extra[@]}" -acquire-by-hash \
 		-distribution="$codename" \
 		-architectures="$(codename_field "$codename" 3)" \
 		-origin="$APT_ORIGIN" -label="$APT_LABEL" \
