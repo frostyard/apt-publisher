@@ -115,15 +115,17 @@ database publishes.
 `publish snapshot`. It repeats the same command, not source staging or
 state saves. `APT_PUBLISH_RETRY_DELAYS` sets the delays in seconds. Its
 default, `10 30`, allows 3 tries. An empty value disables retries. Every
-word must be a non-negative integer.
+word must be a non-negative integer. Initialization checks the value before
+it restores or changes state.
 
 A retry needs a line that starts with `ERROR: unable to publish:` and has
 an R2 transient marker on that same line: `StatusCode: 5xx`, exhausted
 attempts, `i/o timeout`, `context deadline exceeded`, `TLS handshake timeout`
 or `connection reset by peer`. A `StatusCode: 4xx` on that line prevents a
 retry, including 429. Signing, validation and database errors do not retry.
-Each retry logs its try number and delay, and each attempt sends its output
-to stderr.
+Each retry logs its try number and delay. The helper captures only stderr;
+stdout passes through. aptly's stderr appears in the log only after each try
+ends, so cancellation during a long publish loses that try's stderr.
 
 A final failure returns aptly's last exit code unchanged. Pending markers,
 move markers and state saves stay unchanged, so recovery is the same: a

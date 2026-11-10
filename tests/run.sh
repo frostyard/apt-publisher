@@ -295,10 +295,22 @@ EOF
 chmod +x "$tmp/shim-repolist/aptly" "$tmp/shim-rclone/rclone" "$tmp/shim-gh/gh" "$tmp/shim-aptly/aptly"
 mkdir -p "$tmp/gh"
 
-# Fail only the R2 publish commands, before the real aptly changes anything.
+# Record publication and source staging separately. Fail before the real
+# aptly changes anything; source failures must never enter the retry helper.
 mkdir -p "$tmp/shim-publish"
 cat >"$tmp/shim-publish/aptly" <<EOF
 #!/usr/bin/env bash
+if [[ \$2 == publish && \$3 == source ]]; then
+	printf 'source-%s\\n' "\$4" >>"\$SHIM_PUBLISH_COUNT.commands"
+	if [[ \${SHIM_SOURCE_FAIL:-} == "\$4" ]]; then
+		count=\$(( \$(cat "\$SHIM_PUBLISH_COUNT.source-\$4" 2>/dev/null || echo 0) + 1 ))
+		echo "\$count" >"\$SHIM_PUBLISH_COUNT.source-\$4"
+		if ((count == 1)); then
+			printf '%s\\n' "\$SHIM_PUBLISH_ERROR" >&2
+			exit "\$SHIM_PUBLISH_STATUS"
+		fi
+	fi
+fi
 if [[ \$2 == publish && \$3 =~ ^(switch|update|snapshot)\$ ]]; then
 	count=\$(( \$(cat "\$SHIM_PUBLISH_COUNT" 2>/dev/null || echo 0) + 1 ))
 	echo "\$count" >"\$SHIM_PUBLISH_COUNT"
@@ -313,7 +325,8 @@ EOF
 chmod +x "$tmp/shim-publish/aptly"
 # retry_publish FAILURES ERROR STATUS SCRIPT ARGS... resets the call counter.
 retry_publish() {
-	rm -f "$tmp/publish-count" "$tmp/publish-count.commands"
+	rm -f "$tmp/publish-count" "$tmp/publish-count.commands" \
+		"$tmp/publish-count.source-add" "$tmp/publish-count.source-update"
 	local failures=$1 error=$2 status=$3
 	shift 3
 	env PATH="$tmp/shim-publish:$PATH" SHIM_PUBLISH_COUNT="$tmp/publish-count" \
@@ -587,11 +600,30 @@ export APT_CODENAMES_FILE=$tmp/codenames-image.tsv
 must_pass "publish update survives a transient R2 error" \
 	retry_publish 1 "$r2_500" 1 publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-next"
 check "the component addition retries only update" \
-	test "$(paste -sd, "$tmp/publish-count.commands")" = update,update
+	test "$(paste -sd, "$tmp/publish-count.commands")" = source-list,source-add,source-update,update,update
 check "publish update logs exactly one retry" test "$(retry_lines)" = 1
 check "the retried update adds image" grep -qx 'Components: image main' "$pub/dists/trixie/Release"
 check "the retried update preserves the package" listed trixie trixie-thing 1.1
 export APT_CODENAMES_FILE=$tmp/codenames-main.tsv
+
+# Recording staging alone cannot detect an unnecessary retry wrapper. Inject
+# a transient-looking failure into each source mutation to catch that wrapper.
+for source_command in add update; do
+	scope "retrysource$source_command"
+	must_pass "prepare a main-only publication for source $source_command failure" \
+		run publish.sh --producer frostyard/trixie-only --debs "$tmp/retry-old"
+	export APT_CODENAMES_FILE=$tmp/codenames-image.tsv SHIM_SOURCE_FAIL=$source_command
+	status=0
+	retry_publish 0 "$r2_500" 3 publish.sh --producer frostyard/trixie-only \
+		--debs "$tmp/retry-next" >"$tmp/out" 2>"$tmp/err" || status=$?
+	check "a source $source_command failure preserves exit code 3" test "$status" = 3
+	check "a source $source_command failure makes exactly one source call" \
+		test "$(cat "$tmp/publish-count.source-$source_command")" = 1
+	check "a source $source_command failure logs no retry" test "$(retry_lines)" = 0
+	check "a source $source_command failure never reaches publication" test ! -e "$tmp/publish-count"
+	unset SHIM_SOURCE_FAIL
+	export APT_CODENAMES_FILE=$tmp/codenames-main.tsv
+done
 
 # A transient marker must be on the Publish error line, never on a DB,
 # validation or signer error. A 4xx wins even when attempts were exhausted.
@@ -646,6 +678,10 @@ scope retryinvalid
 must_fail "invalid publish retry delays are refused" 'APT_PUBLISH_RETRY_DELAYS must contain only non-negative integers' \
 	env APT_PUBLISH_RETRY_DELAYS=ten APTLY_ROOT="$(mktemp -d "$tmp/runner.XXXXXX")" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/trixie-only --debs "$tmp/retry-old"
+check "invalid retry delays leave no pending marker" \
+	test ! -e "$tmp/s3/frostyard-apt-state/retryinvalid/txn/pending-trixie"
+check "invalid retry delays leave no saved database" \
+	test ! -e "$tmp/s3/frostyard-apt-state/retryinvalid/db"
 scope debian
 
 # --- point-in-time rollback -------------------------------------------------------------

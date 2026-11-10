@@ -25,14 +25,20 @@ pinned version changes (`mise.toml`, `mise.lock`).
   `Publish` leaves that database entry unchanged. For `publish update`, the
   staged source revision stays in the database.
 - A failed `Publish` prints `ERROR: unable to publish:` on stderr and exits
-  1. Retry only transient R2 errors on that line. Errors before `Publish`
-  (`unable to switch:`, `unable to update:`, signer initialization) and
-  after it (`unable to save to DB:`) must not retry.
-- aptly writes indexes with a `.tmp` suffix, then renames them at the end.
-  Pool uploads skip objects with the same MD5. Repeating the same publish
-  command with the same snapshots converges, as pending-marker recovery
-  does. `publish source add/update` change the database before publication;
-  repeating the whole staging path is not safe.
+  1. Only a failed `Publish` is an R2 error that a repeat can fix. Errors
+  before `Publish` also leave the database unchanged, but must not retry.
+  These include `unable to switch:`, `unable to update:` and signer
+  initialization. `publish snapshot` also uses `unable to publish:` for
+  snapshot-load errors before `Publish`; those have no transient marker.
+  Retry only transient R2 errors on that line, never errors after `Publish`
+  (`unable to save to DB:`).
+- Re-publication (`publish switch` and `publish update`) writes indexes with
+  a `.tmp` suffix, then renames them at the end (`deb/publish.go`,
+  `rePublishing`). A first `publish snapshot` writes final names directly;
+  nothing is live yet. Pool uploads skip objects with the same MD5.
+  Repeating the same publish command with the same snapshots converges, as
+  pending-marker recovery does. `publish source add/update` change the
+  database before publication; repeating the whole staging path is not safe.
 - S3 uploads are a single `PutObject` with `Md5` metadata. That is why
   `verify --deep` can trust the R2 ETag as the MD5.
 - A database-only state (no pool) broke the import-then-publish flow and
@@ -54,9 +60,12 @@ pinned version changes (`mise.toml`, `mise.lock`).
 
 ### rclone 1.71.1
 
-- rclone already retries: defaults are `--retries 3` and
-  `--low-level-retries 10`. The aptly retry helper does not wrap rclone.
-
+- rclone's high-level `--retries` (default 3) repeats sync, copy and move
+  operations. Other commands, such as `cat` and `lsf`, get only low-level
+  retries (`--low-level-retries`, default 10), typically for one HTTP
+  request. The aptly retry helper does not wrap rclone. The local
+  `rclone help flags` confirms both defaults; the installed `rclone.1`
+  manual describes high-level retries as repeating the entire sync.
 - `rclone serve s3` quirks (tests only): it livelocks intermittently with
   `--dir-cache-time 0s`, so keep the default; auth keys `AK,SK` were
   rejected, while `testaccesskey,testsecretkey123` works.

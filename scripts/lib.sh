@@ -148,8 +148,9 @@ r2_env() {
 
 aptly_() { aptly -config="$APTLY_CONF" "$@"; }
 
-# Only Publish errors leave aptly's publication database unchanged. Match the
-# transient marker on that error line, and never retry a 4xx (including 429).
+# Only a failed Publish is an R2 error that a repeat can fix. Earlier errors
+# also leave the database unchanged; snapshot-load errors use this prefix but
+# have no transient marker. Never retry a 4xx (including 429).
 r2_transient() {
 	awk '
 		/^ERROR: unable to publish:/ && !/StatusCode: 4[0-9][0-9]/ &&
@@ -157,18 +158,28 @@ r2_transient() {
 		END { exit !found }' "$1"
 }
 
-# aptly_publish_retry SUBCOMMAND ARGS... repeats only the R2 publication,
-# never source staging. aptly prints its ERROR line on stderr: stderr is kept
-# for the classifier and then copied to stderr; stdout passes through. The
-# subshell keeps its temporary-file trap local.
-aptly_publish_retry() (
-	local settings=${APT_PUBLISH_RETRY_DELAYS-10 30} delay output status attempt=1 total
+# publish_retry_delays validates the knob and prints the delays. Call it
+# directly during initialization so die exits before any state change.
+publish_retry_delays() {
+	local settings=${APT_PUBLISH_RETRY_DELAYS-10 30} delay
 	local -a delays=()
 	settings=${settings//$'\n'/ }
 	IFS=$' \t' read -r -a delays <<<"$settings"
 	for delay in "${delays[@]}"; do
 		[[ $delay =~ ^[0-9]+$ ]] || die "APT_PUBLISH_RETRY_DELAYS must contain only non-negative integers (got: $delay)"
 	done
+	printf '%s\n' "$settings"
+}
+
+# aptly_publish_retry SUBCOMMAND ARGS... repeats only the R2 publication,
+# never source staging. aptly prints its ERROR line on stderr: stderr is kept
+# for the classifier and then copied to stderr; stdout passes through. The
+# subshell keeps its temporary-file trap local.
+aptly_publish_retry() (
+	local settings delay output status attempt=1 total
+	local -a delays=()
+	settings=$(publish_retry_delays)
+	IFS=$' \t' read -r -a delays <<<"$settings"
 	total=$((${#delays[@]} + 1))
 	output=$(mktemp)
 	trap 'rm -f -- "$output"' EXIT
@@ -189,6 +200,7 @@ aptly_publish_retry() (
 # aptly_init writes aptly.conf and restores aptly's state from the state
 # bucket. Every mutating script starts here, as if on a fresh runner.
 aptly_init() {
+	publish_retry_delays >/dev/null
 	require aptly rclone jq gpg gpgv
 	r2_env
 	mkdir -p "$APTLY_ROOT"
