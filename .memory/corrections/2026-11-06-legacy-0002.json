@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-06",
+  "scope": "baseline guard",
+  "correction": "A guard script needs a committed negative-test harness, and a step scan must find an action in any key of a list item, not only in a first-key uses line",
+  "evidence": "apt-publisher#34, cross-review (openai/gpt-6.1-sol) of head 166ab0c, findings 1 to 3",
+  "promoted_to": "tests/check-baseline-test.sh"
+}

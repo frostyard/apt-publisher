@@ -29,26 +29,30 @@ for alias in CLAUDE.md GEMINI.md .cursorrules .github/copilot-instructions.md; d
 		fail "$alias resolves to $resolved, not AGENTS.md"
 done
 
-# B2: the corrections inbox (ADR-0018): the rules of core's
-# scripts/check-corrections.mjs. Every line is a JSON object with exactly the 5
-# string fields, no duplicate key, a real YYYY-MM-DD date, and no empty
-# scope, correction or evidence. A blank line fails; the last line counts with
-# or without a trailing newline. The path is an argument, never part of the
-# Python source.
-corrections=$ROOT/.memory/corrections.jsonl
-[[ -f $corrections ]] || fail ".memory/corrections.jsonl is missing"
-correction_lines=$(python3 - "$corrections" <<'PY'
+# B2: the corrections inbox (core ADR-0018, ADR-0081): the rules of core's
+# scripts/check-corrections.mjs (v2, without --base). The retired
+# .memory/corrections.jsonl must not exist. .memory/corrections/ is a real
+# folder that holds only record files and an optional empty .gitkeep: no
+# subfolder and no symbolic link. A record file is named <date>-<slug>.json
+# (a slug of at most 60 characters) and is valid UTF-8 with 1 JSON object:
+# exactly the 5 string fields, no duplicate key, a real YYYY-MM-DD date that
+# equals the name date, and no empty scope, correction or evidence. Its bytes
+# are the canonical form: JSON.stringify of the 5 fields in that order, a
+# 2-space indent and 1 final newline. A folder with only .gitkeep has 0
+# records. The root is an argument, never part of the Python source.
+correction_records=$(python3 - "$ROOT" <<'PY'
 import datetime
 import json
+import os
 import re
+import stat
 import sys
 
-path = sys.argv[1]
-with open(path, encoding="utf-8", newline="") as handle:
-    text = handle.read()
-lines = text.split("\n")
-if lines and lines[-1] == "":
-    lines.pop()
+root = sys.argv[1]
+OLD = ".memory/corrections.jsonl"
+DIR = ".memory/corrections"
+NAME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-([a-z0-9]+(?:-[a-z0-9]+)*)\.json")
+SLUG_MAX = 60
 required = ("date", "scope", "correction", "evidence", "promoted_to")
 # The whitespace that JavaScript's String.prototype.trim() removes: a lone
 # "\r" and a byte-order mark are whitespace to a reader's JavaScript.
@@ -57,6 +61,8 @@ WHITESPACE = (
     + "".join(chr(code) for code in range(0x2000, 0x200B))
     + "\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
+# JSON.stringify writes a lone surrogate as a lowercase \u escape.
+LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def trimmed(text):
@@ -75,22 +81,63 @@ def pairs(items):
     return dict(items)
 
 
-def problem(number, message):
-    sys.stderr.write(f"{path}:{number}: {message}\n")
+def problem(path, message):
+    sys.stderr.write(f"{path}: {message}\n")
     sys.exit(1)
 
 
-for number, line in enumerate(lines, 1):
-    if trimmed(line) == "":
-        problem(number, "blank line")
+def canonical(value):
+    ordered = {key: value[key] for key in required}
+    text = json.dumps(ordered, indent=2, ensure_ascii=False)
+    text = LONE_SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+    return (text + "\n").encode("utf-8")
+
+
+if os.path.lexists(os.path.join(root, OLD)):
+    sys.stderr.write(f"{OLD} is retired; add a file under {DIR}/\n")
+    sys.exit(1)
+folder = os.path.join(root, DIR)
+try:
+    info = os.lstat(folder)
+except (FileNotFoundError, NotADirectoryError):
+    problem(DIR, "folder is missing")
+if stat.S_ISLNK(info.st_mode):
+    problem(DIR, "symbolic link, not followed")
+if not stat.S_ISDIR(info.st_mode):
+    problem(DIR, "not a folder")
+
+records = 0
+for name in sorted(os.listdir(folder)):
+    path = f"{DIR}/{name}"
+    info = os.lstat(os.path.join(folder, name))
+    if stat.S_ISLNK(info.st_mode):
+        problem(path, "symbolic link, not followed")
+    if not stat.S_ISREG(info.st_mode):
+        problem(path, "not a regular file")
+    if name == ".gitkeep":
+        if info.st_size != 0:
+            problem(path, ".gitkeep is not empty")
+        continue
+    match = NAME.fullmatch(name)
+    if not match:
+        problem(path, "bad file name (want <date>-<slug>.json)")
+    if len(match.group(2)) > SLUG_MAX:
+        problem(path, f"slug longer than {SLUG_MAX} characters")
+    records += 1
+    with open(os.path.join(folder, name), "rb") as handle:
+        data = handle.read()
     try:
-        value = json.loads(line, object_pairs_hook=pairs)
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        problem(path, "invalid UTF-8")
+    try:
+        value = json.loads(text, object_pairs_hook=pairs)
     except DuplicateKey as error:
-        problem(number, str(error))
+        problem(path, str(error))
     except ValueError:
-        problem(number, "invalid JSON")
+        problem(path, "invalid JSON")
     if not isinstance(value, dict):
-        problem(number, "not a JSON object")
+        problem(path, "not a JSON object")
     missing = [key for key in required if key not in value]
     unknown = [key for key in value if key not in required]
     if missing or unknown:
@@ -99,24 +146,28 @@ for number, line in enumerate(lines, 1):
             parts.append("missing key(s): " + ", ".join(missing))
         if unknown:
             parts.append("unknown key(s): " + ", ".join(unknown))
-        problem(number, "; ".join(parts))
+        problem(path, "; ".join(parts))
     for key in required:
         if not isinstance(value[key], str):
-            problem(number, f"value for {key} is not a string")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value["date"]):
-        problem(number, f"invalid date: {value['date']}")
+            problem(path, f"value for {key} is not a string")
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value["date"]):
+        problem(path, f"invalid date: {value['date']}")
     try:
         datetime.date.fromisoformat(value["date"])
     except ValueError:
-        problem(number, f"invalid date: {value['date']}")
+        problem(path, f"invalid date: {value['date']}")
     for key in ("scope", "correction", "evidence"):
         if trimmed(value[key]) == "":
-            problem(number, f"{key} is empty")
-sys.stdout.write(str(len(lines)))
+            problem(path, f"{key} is empty")
+    if match.group(1) != value["date"]:
+        problem(path, f"name date {match.group(1)} does not equal date {value['date']}")
+    if data != canonical(value):
+        problem(path, "not in canonical form")
+sys.stdout.write(str(records))
 PY
 ) || fail "the corrections check failed; see the line above"
-[[ $correction_lines =~ ^[0-9]+$ ]] ||
-	fail "the corrections check printed no line count"
+[[ $correction_records =~ ^[0-9]+$ ]] ||
+	fail "the corrections check printed no record count"
 
 # B3: the docs shape (core ADR-0025): the index, the org ADR list and the 4
 # category templates.
@@ -652,4 +703,4 @@ words=$(wc -w <"$ROOT/README.md")
 words=${words//[[:space:]]/}
 ((words <= 1000)) || fail "README.md has $words words; the limit is 1000"
 
-echo "ok - baseline: ${#workflow_files[@]} workflows, $correction_lines corrections lines, $risk_count risk-path entries, ${#caller_body[@]} caller lines, README $words words"
+echo "ok - baseline: ${#workflow_files[@]} workflows, $correction_records corrections records, $risk_count risk-path entries, ${#caller_body[@]} caller lines, README $words words"

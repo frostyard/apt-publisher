@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-09",
+  "scope": "risk-path checks",
+  "correction": "Rule C needs a matching glob for each required path, not 1 match in total; a level is checked for its exact value inside jq, because a command substitution strips a trailing LF; and a glob segment pattern must not return through a command substitution for the same reason.",
+  "evidence": "frostyard/apt-publisher#39 cross-review (openai/gpt-6.1-sol) of head 3475101",
+  "promoted_to": "tests/check-baseline.sh and tests/check-baseline-test.sh"
+}

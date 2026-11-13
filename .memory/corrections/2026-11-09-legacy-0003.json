@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-09",
+  "scope": "risk-path glob and caller checks",
+  "correction": "Rule C must port core's matchGlob exactly, and the caller check must read the caller's exact text instead of guessing YAML structure, because each guess misses a glob that core matches or accepts a caller that differs.",
+  "evidence": "the same defects that cross-review (openai/gpt-6.1-sol) found in the caller and glob checks of bketelsen/agentic-template#9, frostyard/homebrew-tap#37, frostyard/flatpak-index#14 and frostyard/repogen#92",
+  "promoted_to": "tests/check-baseline.sh and tests/check-baseline-test.sh"
+}
