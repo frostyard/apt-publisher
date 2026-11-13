@@ -32,15 +32,20 @@
 #
 # Add a producer only after confirming the package names it ships.
 frostyard/updex	frostyard-updex	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
-# incus versions carry -debian13-, which is not a ~debNN marker, so they
-# would route to every target: trixie only until they carry ~deb13/~deb14.
+# incus builds Debian 13 and Debian 14 in separate jobs and releases each
+# build on its own (core Plan 0009 Phase 6). The Debian 14 versions carry
+# ~deb14 (1:7.6-debian14-202611131200~deb14), so they route to forky only.
+# The Debian 13 versions (1:7.6-debian13-202611131200) carry -debian13-,
+# which is not a ~debNN marker: an unmarked version goes to every target, so
+# each incus request names its codename (trixie or forky), and a manual
+# publish of an incus trixie release must name trixie too.
 # It releases from pushes to stable: builds-docker.yml attests and creates
 # the release only on refs/heads/stable, so its policy names that branch
 # (ADR-0004; Brian, T733a).
 # image (core ADR-0059 step 5): Debian 13 ships incus, incus-base,
 # incus-client and incus-extra (trixie-security), and the 1: epoch makes these
 # builds replace them; incus-ui-canonical goes with them, one producer.
-frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie	builds-docker.yml@refs/heads/stable	frostyard/snosi	image	-
+frostyard/incus	incus,incus-base,incus-client,incus-extra,incus-ui-canonical	trixie,forky	builds-docker.yml@refs/heads/stable	frostyard/snosi	image	-
 # Static Go, attested from v* tags; the v* tag pattern and the attestation
 # both refuse the unattested nightly `dev` prerelease, whose 1.0.0.dev version
 # sorts above releases.
@@ -48,23 +53,33 @@ frostyard/intuneme	frostyard-intuneme	trixie,forky	release.yml@refs/tags/v*	fros
 # Static Go. frostyard-firn-gui (firn ADR-0021) loads GTK 3, Pango and Cairo
 # with dlopen and declares no Depends; trixie and forky ship the same sonames.
 frostyard/firn	frostyard-firn,frostyard-firn-gui	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
-# GTK4/libadwaita are loaded at runtime (puregotk, no Depends): trixie until a
-# forky smoke test passes.
-frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	release.yml@refs/tags/v*	frostyard/snosi	main	-
-# bootc (Rust) and libostree-1-1 (C) link trixie's libraries, so their versions
-# carry ~deb13. trixie only until a ~deb14 forky build exists, which must also
-# sort above forky's own libostree-1-1 (2026.4-1). Exact names, not libostree-*,
-# keep it from shadowing Debian's other libostree packages.
+# Static Go (CGO_ENABLED=0): MyGo loads GTK 3, Pango with cairo and libepoxy at
+# run time with purego. The deb's Depends are package names that trixie and
+# forky both ship (libgtk-3-0t64, libpangocairo-1.0-0, libepoxy0, pkexec), so
+# one unmarked build serves both codenames. A smoke test of v0.17.1 on
+# debian:forky passed on 2026-11-13 (core Plan 0009, Phase 6).
+frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
+# bootc (Rust) and libostree-1-1 (C) link the libraries of the codename they
+# are built in, so each release holds a Debian 13 build carrying ~deb13 and a
+# Debian 14 build carrying ~deb14, with one build stamp (core Plan 0009
+# Phase 6). The ~deb14 libostree-1-1 must sort above forky's own
+# (2026.6-1 on 2026-11-13): a build of the same or a newer ostree does
+# (2026.6-frostyard...~deb14 > 2026.6-1). Exact names, not libostree-*, keep
+# it from shadowing Debian's other libostree packages.
 # It releases from manual workflow_dispatch runs of build.yml on main, so its
 # policy names refs/heads/main.
 # image (core ADR-0059 step 5): this libostree-1-1 replaces Debian's, and
 # bootc links against it.
-frostyard/bootc-debian	bootc,libostree-1-1	trixie	build.yml@refs/heads/main	frostyard/snosi	image	-
+frostyard/bootc-debian	bootc,libostree-1-1	trixie,forky	build.yml@refs/heads/main	frostyard/snosi	image	-
 # The packages of snosi's moonlight and voxtype sysexts (core ADR-0066). The
 # ten other omarchy-apps names left the build with snosi's flurry desktop; a
 # release that still holds one is refused. Exact names. Built in debian:trixie
-# against trixie's libraries without a ~deb13 marker, so trixie only. It
+# without a ~deb13 marker: moonlight-qt is a self-contained AppImage repack,
+# and voxtype needs only libc6, libgcc-s1, libstdc++6 and libasound2t64, which
+# forky ships too. The same files go to trixie and forky (core ADR-0055), and
+# omarchy-apps installs and runs each one in debian:forky before it releases
+# (core Plan 0009 Phase 6). It
 # releases from pushes to main through build.yml, so its policy names
 # refs/heads/main. Two versions stay installable: the publication that adds a
 # newer one withdraws the rest (core ADR-0067).
-frostyard/omarchy-apps	moonlight-qt,voxtype	trixie	build.yml@refs/heads/main	frostyard/snosi	main	2
+frostyard/omarchy-apps	moonlight-qt,voxtype	trixie,forky	build.yml@refs/heads/main	frostyard/snosi	main	2
