@@ -53,9 +53,12 @@ frostyard/intuneme	frostyard-intuneme	trixie,forky	release.yml@refs/tags/v*	fros
 # Static Go. frostyard-firn-gui (firn ADR-0021) loads GTK 3, Pango and Cairo
 # with dlopen and declares no Depends; trixie and forky ship the same sonames.
 frostyard/firn	frostyard-firn,frostyard-firn-gui	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
-# GTK4/libadwaita are loaded at runtime (puregotk, no Depends): trixie until a
-# forky smoke test passes.
-frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie	release.yml@refs/tags/v*	frostyard/snosi	main	-
+# Static Go (CGO_ENABLED=0): MyGo loads GTK 3, Pango with cairo and libepoxy at
+# run time with purego. The deb's Depends are package names that trixie and
+# forky both ship (libgtk-3-0t64, libpangocairo-1.0-0, libepoxy0, pkexec), so
+# one unmarked build serves both codenames. A smoke test of v0.17.1 on
+# debian:forky passed on 2026-11-13 (core Plan 0009, Phase 6).
+frostyard/chairlift	frostyard-chairlift,frostyard-chairlift-system-integration	trixie,forky	release.yml@refs/tags/v*	frostyard/snosi	main	-
 # bootc (Rust) and libostree-1-1 (C) link the libraries of the codename they
 # are built in, so each release holds a Debian 13 build carrying ~deb13 and a
 # Debian 14 build carrying ~deb14, with one build stamp (core Plan 0009

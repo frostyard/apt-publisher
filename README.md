@@ -24,7 +24,7 @@ for the producer repositories whose packages it publishes.
 | frostyard/updex | `frostyard-updex` | `main` | `trixie`, `forky` |
 | frostyard/intuneme | `frostyard-intuneme` | `main` | `trixie`, `forky` |
 | frostyard/firn | `frostyard-firn`, `frostyard-firn-gui` | `main` | `trixie`, `forky` |
-| frostyard/chairlift | `frostyard-chairlift`, `frostyard-chairlift-system-integration` | `main` | `trixie` |
+| frostyard/chairlift | `frostyard-chairlift`, `frostyard-chairlift-system-integration` | `main` | `trixie`, `forky` |
 | frostyard/omarchy-apps | `moonlight-qt`, `voxtype` | `main` | `trixie`, `forky` |
 | frostyard/bootc-debian | `bootc`, `libostree-1-1` | `image` | `trixie`, `forky` |
 | frostyard/incus | `incus`, `incus-base`, `incus-client`, `incus-extra`, `incus-ui-canonical` | `image` | `trixie`, `forky` |

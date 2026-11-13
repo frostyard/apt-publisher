@@ -91,8 +91,15 @@ Three steps, in this order.
   version withdraws the rest of its packages (core ADR-0067). Its unmarked
   `debian:trixie` builds go to `trixie` and `forky`; it installs and runs each
   one in `debian:forky` before it releases.
-- **chairlift** is `trixie` only until a smoke test on a forky image passes.
-  Its GTK4/libadwaita are loaded at runtime with no `Depends`.
+- **chairlift** is registered for `trixie` and `forky` with one unmarked
+  build. It is static Go: MyGo loads GTK 3, Pango with cairo and libepoxy at
+  run time with purego. Its deb's `Depends` (`libgtk-3-0t64 | libgtk-3-0`,
+  `libpangocairo-1.0-0`, `libepoxy0`, `pkexec`) name packages that both
+  codenames ship. A smoke test of v0.17.1 on `debian:forky` passed on
+  2026-11-13: install, update, downgrade, the headless checks, and the
+  dry-run window under Xvfb. If a later chairlift links a library whose
+  package name differs between the codenames, it needs `~deb13` and `~deb14`
+  builds instead.
 
 ## Change a producer's component
 
