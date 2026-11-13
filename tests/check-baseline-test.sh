@@ -215,6 +215,17 @@ mut_b2_invalid_date() {
 	changed "$2" "$1" .memory/corrections/2026-02-30-test-invalid-date.json
 }
 
+# Core's Date.UTC maps years 0-99 to 1900-1999, so a year below 100 fails.
+mut_b2_year_0000() {
+	b2_record 0000-01-01 e >"$1/.memory/corrections/0000-01-01-test-year-0000.json"
+	changed "$2" "$1" .memory/corrections/0000-01-01-test-year-0000.json
+}
+
+mut_b2_year_0099() {
+	b2_record 0099-12-31 e >"$1/.memory/corrections/0099-12-31-test-year-0099.json"
+	changed "$2" "$1" .memory/corrections/0099-12-31-test-year-0099.json
+}
+
 mut_b2_bad_date_format() {
 	b2_record 2026-1-05 e >"$1/.memory/corrections/2026-11-06-test-date-format.json"
 	changed "$2" "$1" .memory/corrections/2026-11-06-test-date-format.json
@@ -247,6 +258,12 @@ mut_b2_record_symlink() {
 mut_b2_gitkeep_not_empty() {
 	printf 'x\n' >"$1/.memory/corrections/.gitkeep"
 	changed "$2" "$1" .memory/corrections/.gitkeep
+}
+
+# The year 100 is the first year that core's Date.UTC keeps.
+mut_b2_year_0100_ok() {
+	b2_record 0100-01-01 e >"$1/.memory/corrections/0100-01-01-test-year-0100.json"
+	changed "$2" "$1" .memory/corrections/0100-01-01-test-year-0100.json
 }
 
 # A folder with only an empty .gitkeep holds 0 records and passes.
@@ -650,6 +667,8 @@ order=(
 	b2_not_object
 	b2_non_string_value
 	b2_invalid_date
+	b2_year_0000
+	b2_year_0099
 	b2_bad_date_format
 	b2_empty_evidence
 	b2_bom_evidence
@@ -710,6 +729,7 @@ order=(
 # Cases that mutate the tree and must pass.
 ok_order=(
 	b2_only_gitkeep_ok
+	b2_year_0100_ok
 	b2_unicode_record_ok
 	b6_caller_other_sha_comment_ok
 	b6_caller_leading_comments_ok
@@ -737,6 +757,8 @@ declare -A expected=(
 	[b2_not_object]='.memory/corrections/2026-11-06-test-not-object.json: not a JSON object'
 	[b2_non_string_value]='.memory/corrections/2026-11-06-test-non-string.json: value for promoted_to is not a string'
 	[b2_invalid_date]='.memory/corrections/2026-02-30-test-invalid-date.json: invalid date: 2026-02-30'
+	[b2_year_0000]='.memory/corrections/0000-01-01-test-year-0000.json: invalid date: 0000-01-01'
+	[b2_year_0099]='.memory/corrections/0099-12-31-test-year-0099.json: invalid date: 0099-12-31'
 	[b2_bad_date_format]='.memory/corrections/2026-11-06-test-date-format.json: invalid date: 2026-1-05'
 	[b2_empty_evidence]='.memory/corrections/2026-11-06-test-empty-evidence.json: evidence is empty'
 	[b2_bom_evidence]='.memory/corrections/2026-11-06-test-bom-evidence.json: evidence is empty'

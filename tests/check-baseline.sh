@@ -152,6 +152,9 @@ for name in sorted(os.listdir(folder)):
             problem(path, f"value for {key} is not a string")
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value["date"]):
         problem(path, f"invalid date: {value['date']}")
+    # Core's Date.UTC maps years 0-99 to 1900-1999, so it rejects them.
+    if int(value["date"][:4]) < 100:
+        problem(path, f"invalid date: {value['date']}")
     try:
         datetime.date.fromisoformat(value["date"])
     except ValueError:
