@@ -123,60 +123,162 @@ mut_b1_regular_claude() {
 	changed "$2" "$1" CLAUDE.md
 }
 
-# B2: the corrections inbox.
-mut_b2_blank_line() {
-	printf '\n' >>"$1/.memory/corrections.jsonl"
+# B2: the corrections inbox. Each case writes 1 file into
+# .memory/corrections/ (or changes the folder), and the expected message names
+# the file, so a case fails only for its own reason.
+b2_record() { # b2_record DATE EVIDENCE: a canonical record text
+	printf '{\n  "date": "%s",\n  "scope": "s",\n  "correction": "c",\n  "evidence": "%s",\n  "promoted_to": ""\n}\n' "$1" "$2"
+}
+
+mut_b2_old_file() {
+	printf '%s\n' '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}' \
+		>"$1/.memory/corrections.jsonl"
 	changed "$2" "$1" .memory/corrections.jsonl
 }
 
-mut_b2_final_invalid_no_newline() {
-	printf '%s' '{"date": "2026-11-06", "scope": "s"' >>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+mut_b2_missing_folder() {
+	rm -rf "$1/.memory/corrections"
+	changed "$2" "$1" .memory/corrections
+}
+
+mut_b2_folder_symlink() {
+	mv "$1/.memory/corrections" "$1/.memory/elsewhere"
+	ln -s elsewhere "$1/.memory/corrections"
+	changed "$2" "$1" .memory/corrections
+}
+
+mut_b2_bad_name() {
+	b2_record 2026-11-06 e >"$1/.memory/corrections/2026-11-06-Bad_Name.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-Bad_Name.json
+}
+
+mut_b2_long_slug() {
+	local name
+	name=2026-11-06-$(printf 'a%.0s' {1..61}).json
+	b2_record 2026-11-06 e >"$1/.memory/corrections/$name"
+	changed "$2" "$1" ".memory/corrections/$name"
+}
+
+mut_b2_name_date() {
+	b2_record 2026-11-06 e >"$1/.memory/corrections/2026-11-07-test-name-date.json"
+	changed "$2" "$1" .memory/corrections/2026-11-07-test-name-date.json
+}
+
+# The same record written compactly on 1 line.
+mut_b2_not_canonical() {
+	printf '%s\n' '{"date":"2026-11-06","scope":"s","correction":"c","evidence":"e","promoted_to":""}' \
+		>"$1/.memory/corrections/2026-11-06-test-compact.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-compact.json
+}
+
+mut_b2_invalid_json() {
+	printf '%s' '{"date": "2026-11-06", "scope": "s"' >"$1/.memory/corrections/2026-11-06-test-invalid-json.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-invalid-json.json
+}
+
+mut_b2_invalid_utf8() {
+	b2_record 2026-11-06 $'\xff' >"$1/.memory/corrections/2026-11-06-test-invalid-utf8.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-invalid-utf8.json
 }
 
 mut_b2_duplicate_key() {
-	printf '%s\n' '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": "", "scope": "s"}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	printf '{\n  "date": "2026-11-06",\n  "scope": "s",\n  "correction": "c",\n  "evidence": "e",\n  "promoted_to": "",\n  "scope": "s"\n}\n' \
+		>"$1/.memory/corrections/2026-11-06-test-duplicate-key.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-duplicate-key.json
 }
 
 mut_b2_missing_key() {
-	printf '%s\n' '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e"}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	printf '{\n  "date": "2026-11-06",\n  "scope": "s",\n  "correction": "c",\n  "evidence": "e"\n}\n' \
+		>"$1/.memory/corrections/2026-11-06-test-missing-key.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-missing-key.json
+}
+
+mut_b2_unknown_key() {
+	printf '{\n  "date": "2026-11-06",\n  "scope": "s",\n  "correction": "c",\n  "evidence": "e",\n  "promoted_to": "",\n  "extra": "x"\n}\n' \
+		>"$1/.memory/corrections/2026-11-06-test-unknown-key.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-unknown-key.json
+}
+
+mut_b2_not_object() {
+	printf '%s\n' '[1]' >"$1/.memory/corrections/2026-11-06-test-not-object.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-not-object.json
 }
 
 mut_b2_non_string_value() {
-	printf '%s\n' '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": 1}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	printf '{\n  "date": "2026-11-06",\n  "scope": "s",\n  "correction": "c",\n  "evidence": "e",\n  "promoted_to": 1\n}\n' \
+		>"$1/.memory/corrections/2026-11-06-test-non-string.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-non-string.json
 }
 
 mut_b2_invalid_date() {
-	printf '%s\n' '{"date": "2026-02-30", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	b2_record 2026-02-30 e >"$1/.memory/corrections/2026-02-30-test-invalid-date.json"
+	changed "$2" "$1" .memory/corrections/2026-02-30-test-invalid-date.json
+}
+
+# Core's Date.UTC maps years 0-99 to 1900-1999, so a year below 100 fails.
+mut_b2_year_0000() {
+	b2_record 0000-01-01 e >"$1/.memory/corrections/0000-01-01-test-year-0000.json"
+	changed "$2" "$1" .memory/corrections/0000-01-01-test-year-0000.json
+}
+
+mut_b2_year_0099() {
+	b2_record 0099-12-31 e >"$1/.memory/corrections/0099-12-31-test-year-0099.json"
+	changed "$2" "$1" .memory/corrections/0099-12-31-test-year-0099.json
+}
+
+mut_b2_bad_date_format() {
+	b2_record 2026-1-05 e >"$1/.memory/corrections/2026-11-06-test-date-format.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-date-format.json
 }
 
 mut_b2_empty_evidence() {
-	printf '%s\n' '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "  ", "promoted_to": ""}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
-}
-
-# Two valid records separated by a lone \r, and no \n: core splits on \n, so
-# this is 1 line and 1 invalid JSON record.
-mut_b2_cr_separated_records() {
-	printf '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}\r{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "e", "promoted_to": ""}' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	b2_record 2026-11-06 '  ' >"$1/.memory/corrections/2026-11-06-test-empty-evidence.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-empty-evidence.json
 }
 
 # A record whose evidence is only a byte-order mark: JavaScript trims it away.
 mut_b2_bom_evidence() {
-	printf '{"date": "2026-11-06", "scope": "s", "correction": "c", "evidence": "\xef\xbb\xbf", "promoted_to": ""}\n' \
-		>>"$1/.memory/corrections.jsonl"
-	changed "$2" "$1" .memory/corrections.jsonl
+	b2_record 2026-11-06 $'\xef\xbb\xbf' >"$1/.memory/corrections/2026-11-06-test-bom-evidence.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-bom-evidence.json
+}
+
+mut_b2_subfolder() {
+	mkdir "$1/.memory/corrections/2026-11-06-test-folder.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-folder.json
+}
+
+mut_b2_record_symlink() {
+	local first
+	first=$(cd "$1/.memory/corrections" && find . -maxdepth 1 -name '*.json' -printf '%f\n' | sort | head -n 1)
+	[[ -n $first ]] || return 1
+	ln -s "$first" "$1/.memory/corrections/2026-11-06-test-link.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-link.json
+}
+
+mut_b2_gitkeep_not_empty() {
+	printf 'x\n' >"$1/.memory/corrections/.gitkeep"
+	changed "$2" "$1" .memory/corrections/.gitkeep
+}
+
+# The year 100 is the first year that core's Date.UTC keeps.
+mut_b2_year_0100_ok() {
+	b2_record 0100-01-01 e >"$1/.memory/corrections/0100-01-01-test-year-0100.json"
+	changed "$2" "$1" .memory/corrections/0100-01-01-test-year-0100.json
+}
+
+# A folder with only an empty .gitkeep holds 0 records and passes.
+mut_b2_only_gitkeep_ok() {
+	rm -f "$1"/.memory/corrections/*.json
+	: >"$1/.memory/corrections/.gitkeep"
+	changed "$2" "$1" .memory/corrections/.gitkeep
+}
+
+# Control characters, non-ASCII text and a raw U+2028 in the form that
+# JSON.stringify writes: the check must find it canonical.
+mut_b2_unicode_record_ok() {
+	b2_record 2026-11-06 $'tab\\t nl\\n ctl\\u0001 del\x7f quote\\" e\xcc\x81 \xe2\x80\xa8 \xf0\x9f\x98\x80' \
+		>"$1/.memory/corrections/2026-11-06-test-unicode.json"
+	changed "$2" "$1" .memory/corrections/2026-11-06-test-unicode.json
 }
 
 # B3: the docs shape.
@@ -550,15 +652,29 @@ order=(
 	b1_remove_gemini
 	b1_absolute_cursorrules
 	b1_regular_claude
-	b2_blank_line
-	b2_final_invalid_no_newline
+	b2_old_file
+	b2_missing_folder
+	b2_folder_symlink
+	b2_bad_name
+	b2_long_slug
+	b2_name_date
+	b2_not_canonical
+	b2_invalid_json
+	b2_invalid_utf8
 	b2_duplicate_key
 	b2_missing_key
+	b2_unknown_key
+	b2_not_object
 	b2_non_string_value
 	b2_invalid_date
+	b2_year_0000
+	b2_year_0099
+	b2_bad_date_format
 	b2_empty_evidence
-	b2_cr_separated_records
 	b2_bom_evidence
+	b2_subfolder
+	b2_record_symlink
+	b2_gitkeep_not_empty
 	b3_no_org_adrs
 	b3_no_plans_template
 	b4_ci_without_verify
@@ -612,6 +728,9 @@ order=(
 
 # Cases that mutate the tree and must pass.
 ok_order=(
+	b2_only_gitkeep_ok
+	b2_year_0100_ok
+	b2_unicode_record_ok
 	b6_caller_other_sha_comment_ok
 	b6_caller_leading_comments_ok
 	b6_glob_one_alternative_ok
@@ -623,15 +742,29 @@ declare -A expected=(
 	[b1_remove_gemini]='GEMINI.md must be a symlink to AGENTS.md'
 	[b1_absolute_cursorrules]='.cursorrules must be a relative symlink'
 	[b1_regular_claude]='CLAUDE.md must be a symlink to AGENTS.md'
-	[b2_blank_line]='blank line'
-	[b2_final_invalid_no_newline]='invalid JSON'
-	[b2_duplicate_key]='duplicate key(s): scope'
-	[b2_missing_key]='missing key(s): promoted_to'
-	[b2_non_string_value]='value for promoted_to is not a string'
-	[b2_invalid_date]='invalid date: 2026-02-30'
-	[b2_empty_evidence]='evidence is empty'
-	[b2_cr_separated_records]='invalid JSON'
-	[b2_bom_evidence]='evidence is empty'
+	[b2_old_file]='.memory/corrections.jsonl is retired; add a file under .memory/corrections/'
+	[b2_missing_folder]='.memory/corrections: folder is missing'
+	[b2_folder_symlink]='.memory/corrections: symbolic link, not followed'
+	[b2_bad_name]='.memory/corrections/2026-11-06-Bad_Name.json: bad file name'
+	[b2_long_slug]='-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json: slug longer than 60 characters'
+	[b2_name_date]='.memory/corrections/2026-11-07-test-name-date.json: name date 2026-11-07 does not equal date 2026-11-06'
+	[b2_not_canonical]='.memory/corrections/2026-11-06-test-compact.json: not in canonical form'
+	[b2_invalid_json]='.memory/corrections/2026-11-06-test-invalid-json.json: invalid JSON'
+	[b2_invalid_utf8]='.memory/corrections/2026-11-06-test-invalid-utf8.json: invalid UTF-8'
+	[b2_duplicate_key]='.memory/corrections/2026-11-06-test-duplicate-key.json: duplicate key(s): scope'
+	[b2_missing_key]='.memory/corrections/2026-11-06-test-missing-key.json: missing key(s): promoted_to'
+	[b2_unknown_key]='.memory/corrections/2026-11-06-test-unknown-key.json: unknown key(s): extra'
+	[b2_not_object]='.memory/corrections/2026-11-06-test-not-object.json: not a JSON object'
+	[b2_non_string_value]='.memory/corrections/2026-11-06-test-non-string.json: value for promoted_to is not a string'
+	[b2_invalid_date]='.memory/corrections/2026-02-30-test-invalid-date.json: invalid date: 2026-02-30'
+	[b2_year_0000]='.memory/corrections/0000-01-01-test-year-0000.json: invalid date: 0000-01-01'
+	[b2_year_0099]='.memory/corrections/0099-12-31-test-year-0099.json: invalid date: 0099-12-31'
+	[b2_bad_date_format]='.memory/corrections/2026-11-06-test-date-format.json: invalid date: 2026-1-05'
+	[b2_empty_evidence]='.memory/corrections/2026-11-06-test-empty-evidence.json: evidence is empty'
+	[b2_bom_evidence]='.memory/corrections/2026-11-06-test-bom-evidence.json: evidence is empty'
+	[b2_subfolder]='.memory/corrections/2026-11-06-test-folder.json: not a regular file'
+	[b2_record_symlink]='.memory/corrections/2026-11-06-test-link.json: symbolic link, not followed'
+	[b2_gitkeep_not_empty]='.memory/corrections/.gitkeep: .gitkeep is not empty'
 	[b3_no_org_adrs]='docs/org-adrs.md is missing'
 	[b3_no_plans_template]='docs/plans/TEMPLATE.md is missing'
 	[b4_ci_without_verify]='the Makefile ci: rule must list verify'

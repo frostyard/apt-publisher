@@ -38,7 +38,7 @@ directory of mode 700, which a stricter umask gives the test fixtures.
   group, the bash `defaults` and that no step overrides the shell.
 - `tests/check-baseline.sh` checks the repository baseline (core
   [ADR-0071](https://github.com/frostyard/core/blob/main/docs/adr/0071-hold-every-code-repository-to-one-baseline.md)):
-  the instruction-file symlinks, `.memory/corrections.jsonl`, the `docs/`
+  the instruction-file symlinks, the `.memory/corrections/` records, the `docs/`
   shape, the make gate and the tool pins, the pinned actions and workflow
   permissions, the risk paths and their caller, the pull request template,
   the CI entry, Dependabot, `SECURITY.md`, no `CODEOWNERS`, no leftover
@@ -83,8 +83,8 @@ diff, `level:L3` skim, `level:L4` title and CI), and `risk:high` at L1 and L2
   publisher runs. See [design/tool-behavior.md](../design/tool-behavior.md).
 - A new refusal or routing rule needs a test in `tests/run.sh`.
 - A blocking review point needs a guard: a test that fails without the fix,
-  or an `AGENTS.md` rule when no test can catch it, plus 1 line in
-  `.memory/corrections.jsonl`.
+  or an `AGENTS.md` rule when no test can catch it, plus 1 record file in
+  `.memory/corrections/` ([`.memory/README.md`](../../.memory/README.md)).
 
 ## Checks to run before a pull request
 
