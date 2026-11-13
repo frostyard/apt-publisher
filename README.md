@@ -25,9 +25,9 @@ for the producer repositories whose packages it publishes.
 | frostyard/intuneme | `frostyard-intuneme` | `main` | `trixie`, `forky` |
 | frostyard/firn | `frostyard-firn`, `frostyard-firn-gui` | `main` | `trixie`, `forky` |
 | frostyard/chairlift | `frostyard-chairlift`, `frostyard-chairlift-system-integration` | `main` | `trixie` |
-| frostyard/omarchy-apps | `moonlight-qt`, `voxtype` | `main` | `trixie` |
-| frostyard/bootc-debian | `bootc`, `libostree-1-1` | `image` | `trixie` |
-| frostyard/incus | `incus`, `incus-base`, `incus-client`, `incus-extra`, `incus-ui-canonical` | `image` | `trixie` |
+| frostyard/omarchy-apps | `moonlight-qt`, `voxtype` | `main` | `trixie`, `forky` |
+| frostyard/bootc-debian | `bootc`, `libostree-1-1` | `image` | `trixie`, `forky` |
+| frostyard/incus | `incus`, `incus-base`, `incus-client`, `incus-extra`, `incus-ui-canonical` | `image` | `trixie`, `forky` |
 
 `config/codenames.tsv` is the source of the first table and
 `config/producers.tsv` of the second.

@@ -73,6 +73,10 @@ must_pass() {
 	}
 	ok "$desc"
 }
+# lacks PATTERN FILE succeeds when FILE has no line with PATTERN.
+lacks() {
+	! grep -q -- "$1" "$2"
+}
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -355,11 +359,43 @@ must_pass "dry run of bootc-debian with the committed configuration" \
 	"$ROOT/scripts/publish.sh" --producer frostyard/bootc-debian --debs "$tmp/committed-bootc" --dry-run
 check "bootc routes to trixie/image" grep -q 'bootc_1.16.8-1~deb13_amd64.deb -> trixie/image' "$tmp/err"
 check "libostree-1-1 routes to trixie/image" grep -q 'libostree-1-1_2026.3-1~deb13_amd64.deb -> trixie/image' "$tmp/err"
+# core Plan 0009 Phase 6: bootc-debian and incus also publish to forky. A
+# bootc-debian release holds both builds; ~deb14 routes to forky/image only.
+mkdeb "$tmp/committed-bootc-both" bootc '1.17.4-frostyard202611131200~deb13' amd64
+mkdeb "$tmp/committed-bootc-both" libostree-1-1 '2026.6-frostyard202611131200~deb13' amd64
+mkdeb "$tmp/committed-bootc-both" bootc '1.17.4-frostyard202611131200~deb14' amd64
+mkdeb "$tmp/committed-bootc-both" libostree-1-1 '2026.6-frostyard202611131200~deb14' amd64
+must_pass "dry run of a two-codename bootc-debian release with the committed configuration" \
+	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/bootc-debian --debs "$tmp/committed-bootc-both" \
+	--codenames 'trixie forky' --dry-run
+check "the ~deb13 libostree-1-1 routes to trixie/image" \
+	grep -q 'libostree-1-1_2026.6-frostyard202611131200~deb13_amd64.deb -> trixie/image' "$tmp/err"
+check "the ~deb14 libostree-1-1 routes to forky/image" \
+	grep -q 'libostree-1-1_2026.6-frostyard202611131200~deb14_amd64.deb -> forky/image' "$tmp/err"
+check "the ~deb14 bootc does not route to trixie" \
+	lacks 'bootc_1.17.4-frostyard202611131200~deb14_amd64.deb -> trixie' "$tmp/err"
+check "the ~deb13 bootc does not route to forky" \
+	lacks 'bootc_1.17.4-frostyard202611131200~deb13_amd64.deb -> forky' "$tmp/err"
+# An incus trixie build is unmarked (-debian13-), so its request names trixie,
+# as builds-docker.yml does; its forky build carries ~deb14.
 mkdeb "$tmp/committed-incus" incus '1:7.5.1-debian13-202610031200' amd64
 must_pass "dry run of incus with the committed configuration" \
 	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
-	"$ROOT/scripts/publish.sh" --producer frostyard/incus --debs "$tmp/committed-incus" --dry-run
+	"$ROOT/scripts/publish.sh" --producer frostyard/incus --debs "$tmp/committed-incus" --codenames trixie --dry-run
 check "incus routes to trixie/image" grep -q 'incus_7.5.1-debian13-202610031200_amd64.deb -> trixie/image' "$tmp/err"
+check "an incus trixie request does not route to forky" \
+	lacks 'incus_7.5.1-debian13-202610031200_amd64.deb -> forky' "$tmp/err"
+mkdeb "$tmp/committed-incus-forky" incus '1:7.6-debian14-202611131200~deb14' amd64
+must_pass "dry run of an incus forky build with the committed configuration" \
+	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/incus --debs "$tmp/committed-incus-forky" --codenames forky --dry-run
+check "an incus ~deb14 build routes to forky/image" \
+	grep -q 'incus_7.6-debian14-202611131200~deb14_amd64.deb -> forky/image' "$tmp/err"
+mkdeb "$tmp/committed-incus-forky-to-trixie" incus '1:7.6-debian14-202611131200~deb14' amd64
+must_fail "an incus ~deb14 build cannot go to trixie" "not a target" \
+	env APT_PRODUCERS_FILE="$ROOT/config/producers.tsv" APT_CODENAMES_FILE="$ROOT/config/codenames.tsv" \
+	"$ROOT/scripts/publish.sh" --producer frostyard/incus --debs "$tmp/committed-incus-forky-to-trixie" --codenames trixie --dry-run
 
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb13' amd64
 mkdeb "$tmp/bootc" bootc '1.16.8-1~deb14' amd64

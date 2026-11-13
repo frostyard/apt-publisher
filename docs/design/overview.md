@@ -188,10 +188,11 @@ canary installs the new packages with apt through the public URL.
   - GitHub lists release assets with `.` in place of `~`
     (`bootc_1.16.8-1.deb13_amd64.deb`). Routing reads the version from the
     package, and the audit compares `~` as `.`.
-  - incus is the exception for now. Its versions
-    (`1:7.5.1-debian13-202610031200`) carry `-debian13-`, which is not a
-    marker, so it is registered for `trixie` only until they carry `~deb13`
-    or `~deb14`.
+  - incus is the exception on trixie. Its Debian 13 versions
+    (`1:7.6-debian13-202611131200`) carry `-debian13-`, which is not a
+    marker, so they would go to every target; its Debian 14 versions carry
+    `~deb14` (`1:7.6-debian14-202611131200~deb14`). incus releases each
+    codename's build on its own, and each request names its codename.
 
 ### Components
 
