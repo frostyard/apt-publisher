@@ -1,19 +1,20 @@
 # Security policy
 
-apt-publisher is a private repository. It is the single writer of the
-Frostyard APT repository at `https://repository.frostyard.org/debian/`, which
-every Frostyard host installs packages from.
+apt-publisher is the single writer of the Frostyard APT repository at
+`https://repository.frostyard.org/debian/`, which every Frostyard host
+installs packages from.
 
 ## Reporting a vulnerability
 
-GitHub private vulnerability reporting is not available for a private
-repository. Please do not open a public issue, and do not post credentials,
-keys or logs that contain them.
+The repository is public. Do not report a vulnerability in an issue, a pull
+request or a discussion: everyone sees those. Do not post credentials, keys or
+logs that contain them.
 
-- Email the maintainer: bketelsen@gmail.com.
-- The repository's Security tab, https://github.com/frostyard/apt-publisher/security,
-  shows this policy to collaborators. It has no private report form for a
-  private repository, so use email.
+- Open the Security tab, https://github.com/frostyard/apt-publisher/security,
+  and click **Report a vulnerability** (GitHub's private vulnerability
+  reporting).
+- If the Security tab has no report form, email the maintainer:
+  bketelsen@gmail.com.
 
 Tell us what you can: the component, the version or commit, what an attacker
 can do, and the smallest way to reproduce it. We will answer with what we

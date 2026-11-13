@@ -92,3 +92,4 @@ tools the end-to-end test needs, and what it simulates.
 - [docs/README.md](docs/README.md): the decisions, the design, the specs and
   the runbooks.
 - [SECURITY.md](SECURITY.md): report a vulnerability, and what gets fixes.
+- [LICENSE](LICENSE): MIT.
