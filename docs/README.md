@@ -22,6 +22,8 @@ Docs are split by the question they answer:
 - [0002 — Publish two components per codename](adr/0002-two-components-per-codename.md)
 - [0003 — Keep the newest versions of a producer](adr/0003-keep-the-newest-versions-of-a-producer.md)
 - [0004 — Pin the signer workflow of attested producers](adr/0004-pin-the-signer-workflow-of-attested-producers.md)
+- [0005 — Check publications with an apt download canary](adr/0005-check-publications-with-an-apt-download-canary.md)
+- [0006 — State the reason for the incus signer ref](adr/0006-state-the-reason-for-the-incus-signer-ref.md)
 
 ### Design
 

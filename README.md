@@ -58,9 +58,10 @@ has the three steps, the registration columns and the token command.
 
 A release's `.deb` files are verified against the producer's build
 attestation, routed to their codenames, added to aptly and published as one
-signed `Release` per codename, then read back from the bucket and installed
-through the public URL by a canary. [docs/design/overview.md](docs/design/overview.md)
-has the flow, the buckets and the state rules;
+signed `Release` per codename, then read back from the bucket and downloaded
+through the public URL by an apt canary.
+[docs/design/overview.md](docs/design/overview.md) has the flow, the buckets
+and the state rules;
 [docs/runbooks/operations.md](docs/runbooks/operations.md) has withdraw,
 retention, rollback, move and recovery.
 

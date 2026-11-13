@@ -58,7 +58,8 @@ the same group.
 
 The nightly **audit** workflow catches anything that still slips through,
 such as a producer whose dispatch step failed: it reports every latest-release
-`.deb` that no codename lists. It also runs the Debian-name audit
+`.deb` that no codename lists in the producer's registered component. It also
+runs the Debian-name audit
 (`scripts/audit-debian-names.sh`, core ADR-0059): it prints
 `DEBIAN-NAME codename package suites` for each package in `main` whose name
 Debian ships in the codename's suite, `-updates`, `-security` or `-backports`.
@@ -168,7 +169,13 @@ Every publish is read back from the bucket:
 
 Rollbacks and imports also run the deep check: every file the codename lists,
 in every component, must be in the bucket with the index's MD5. Finally, the
-canary installs the new packages with apt through the public URL.
+canary runs `apt-get update` and `apt-get download` for each new package
+through the public URL. apt checks the signature, the indexes and the package
+hashes through the CDN. The canary installs nothing, so it does not check
+dependency resolution or maintainer scripts
+([ADR-0005](../adr/0005-check-publications-with-an-apt-download-canary.md)).
+An install step in a throwaway container is a planned feature
+([#48](https://github.com/frostyard/apt-publisher/issues/48)).
 
 ### Codenames and versions
 
@@ -348,8 +355,10 @@ A host that needs the image component replaces `Components: main` with
   demand, is a possible optimisation.
 - **Audit heuristics.** It parses `name_version_arch.deb` asset names and
   checks only each producer's latest release. It counts an asset as
-  published if any of the producer's codenames lists it. It reports withdrawn
-  latest releases as missing, by design.
+  published if any of the producer's codenames lists it in the producer's
+  registered component (`main` or `image`). Around a component move, it reports
+  a package that a codename lists only in the other component as missing. It
+  reports withdrawn latest releases as missing, by design.
 - **Point-in-time rollback** also unpublishes other producers' later
   packages until they are republished. Use withdraw for a single bad
   version.
