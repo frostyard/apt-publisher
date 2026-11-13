@@ -70,3 +70,4 @@ No producer is `no` now.
   [scripts/fetch-release.sh](../../scripts/fetch-release.sh),
   [tests/check-config.sh](../../tests/check-config.sh)
 - Evidence: `tests/run.sh`, section "build provenance (ADR-0004)"
+- Amended in part by: [ADR-0006](0006-state-the-reason-for-the-incus-signer-ref.md)

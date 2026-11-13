@@ -127,7 +127,8 @@ inspect what changed first.
 - **Health check** (needs R2 credentials):
   `scripts/verify.sh trixie --deep frostyard-updex=2.0.2`. A spec can name a
   component, `image/NAME=VERSION`, and `!` asks for absence.
-- **Install check** through the public URL:
+- **Download check** through the public URL (apt checks the signature, the
+  indexes and the package hashes; it installs nothing):
   `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`; use
   `trixie/image` for the image component.
 - **Missed releases:** `scripts/audit-producers.sh`, run nightly by

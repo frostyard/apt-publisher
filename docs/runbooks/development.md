@@ -15,9 +15,10 @@ make verify    # shellcheck, actionlint, the config checks, the end-to-end test
 `mise.toml` and `mise.lock` pin every tool (core ADR-0043): aptly 1.6.3,
 rclone 1.71.1, shellcheck 0.11.0, actionlint 1.7.7 and jq 1.8.1.
 
-The end-to-end test also needs `gpg`, `gpgv`, `dpkg-deb`, `apt-get`, `curl`
-and `python3` from the system, which Debian and the Ubuntu runners already
-have.
+The end-to-end test also needs `gpg`, `gpgv`, `gpgconf`, `dpkg-deb`,
+`apt-get`, `apt-cache`, `curl`, `python3`, `sha256sum`, `gzip` and `xz` from
+the system, which Debian and the Ubuntu runners already have. `tests/run.sh`
+checks for each tool before it starts.
 
 Run the gate with `umask 022`: `dpkg-deb` refuses a package control
 directory of mode 700, which a stricter umask gives the test fixtures.

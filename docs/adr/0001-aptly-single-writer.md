@@ -103,5 +103,6 @@ by-hash indexes, signing and S3-compatible publishing.
   repogen ADR-0011 and ADR-0013
 - Shapes: [README](../../README.md), [scripts/publish.sh](../../scripts/publish.sh),
   [scripts/import-stable.sh](../../scripts/import-stable.sh)
+- Amended in part by: [ADR-0005](0005-check-publications-with-an-apt-download-canary.md)
 - Accepted for the organization as: core
   [ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md)
