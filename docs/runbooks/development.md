@@ -62,7 +62,10 @@ refusal or routing rule.
 - It builds a repogen-shaped legacy suite.
 - It runs every script as a fresh runner.
 - It checks the published result with `apt-get update` / `apt-cache policy`
-  and the canary's `apt-get download` in a sandboxed apt root.
+  and the canary's `apt-get download` in a sandboxed apt root. A fake
+  container runtime (`APT_CANARY_RUNTIME`) stands in for the canary's
+  install check, so the test needs no `docker` or `podman`; it records each
+  install target and fails a run on request.
 - It simulates the failures it guards against: a stale database, an
   interrupted publication (an `rclone` shim that fails a save), leftover
   import files, corrupted pool files and tampered indexes.

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-13",
+  "scope": "tests",
+  "correction": "A new routing rule for arch:all rows (they join the amd64 install container of their codename and component) needs its own report fixture with amd64, all, duplicate and all-only rows; amd64 and arm64 fixtures alone do not guard it",
+  "evidence": "frostyard/apt-publisher#55, cross-review of head 5f062ab (openai/gpt-6.1-sol)",
+  "promoted_to": "tests/run.sh"
+}

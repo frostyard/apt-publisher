@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-13",
+  "scope": "scripts",
+  "correction": "A cleanup command that runs after a time budget is spent needs its own hard limit with a kill grace (timeout -k), and its failure must be reported: timeout without -k waits forever for a command that ignores SIGTERM",
+  "evidence": "frostyard/apt-publisher#55, cross-review of head 5f062ab (openai/gpt-6.1-sol)",
+  "promoted_to": "tests/run.sh"
+}

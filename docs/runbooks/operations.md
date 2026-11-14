@@ -127,10 +127,13 @@ inspect what changed first.
 - **Health check** (needs R2 credentials):
   `scripts/verify.sh trixie --deep frostyard-updex=2.0.2`. A spec can name a
   component, `image/NAME=VERSION`, and `!` asks for absence.
-- **Download check** through the public URL (apt checks the signature, the
-  indexes and the package hashes; it installs nothing):
+- **Canary** through the public URL: apt checks the signature, the indexes
+  and the package hashes, then, for `amd64`, installs the packages in a
+  throwaway `debian:<codename>` container (ADR-0007; it needs `docker` or
+  `podman`, or `APT_CANARY_RUNTIME`):
   `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`; use
-  `trixie/image` for the image component.
+  `trixie/image` for the image component. The install check alone:
+  `scripts/install-canary.sh trixie frostyard-updex=2.0.2`.
 - **Missed releases:** `scripts/audit-producers.sh`, run nightly by
   **audit**. Debian names in `main`: `scripts/audit-debian-names.sh`, also
   run by **audit**. The nightly schedule runs only while the repository

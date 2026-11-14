@@ -40,6 +40,7 @@ packages through the public URL". Everything else in ADR-0001 stands.
 ## References
 
 - Amends in part: [ADR-0001](0001-aptly-single-writer.md)
+- Amended in part by: [ADR-0007](0007-install-new-packages-in-a-throwaway-container.md)
 - Shapes: [scripts/apt-canary.sh](../../scripts/apt-canary.sh),
   [design/overview.md](../design/overview.md),
   [runbooks/operations.md](../runbooks/operations.md)

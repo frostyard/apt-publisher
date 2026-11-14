@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-13",
+  "scope": "scripts",
+  "correction": "Detect the container runtime from the first stdout line of RUNTIME --version only, and refuse an unknown identity: a podman-docker wrapper prints a notice on stderr first, and a merged or default-to-Docker check leaves --http-proxy=false out (fails open)",
+  "evidence": "frostyard/apt-publisher#55, cross-review of head 9b286a2 (openai/gpt-6.1-sol)",
+  "promoted_to": "tests/run.sh"
+}
