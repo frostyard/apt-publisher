@@ -25,4 +25,4 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: frostyard/core/.github/workflows/pr-triage.yml@267421dc7de3a9c6a174b41b1976bdce5c7fe24f # frostyard/core main, 2026-11-09 (core#228)
+    uses: frostyard/core/.github/workflows/pr-triage.yml@981e7aeb014cbd3efee710e99a5043fcc4763446 # frostyard/core main, 2026-11-14 (core#246; core has no release tags)
