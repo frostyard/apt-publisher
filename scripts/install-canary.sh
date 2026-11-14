@@ -67,16 +67,23 @@ else
 	die "the install canary needs docker or podman (or APT_CANARY_RUNTIME)"
 fi
 
-# A podman runtime gets --http-proxy=false on each run.
-version=$(timeout -k 5 30 "$runtime" --version </dev/null 2>&1) || die "$runtime --version failed: $version"
-run_opts=()
-[[ $version != podman* ]] || run_opts=(--http-proxy=false)
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+
+# The first stdout line of --version names the runtime; stderr can hold a
+# notice (podman-docker prints one), so it is not read. A podman runtime gets
+# --http-proxy=false on each run; an unknown runtime is refused.
+version=$(timeout -k 5 30 "$runtime" --version </dev/null 2>"$work/version.err") ||
+	die "$runtime --version failed: $(cat "$work/version.err")"
+version=${version%%$'\n'*}
+case $version in
+"podman version "*) run_opts=(--http-proxy=false) ;;
+"Docker version "*) run_opts=() ;;
+*) die "unknown container runtime: $runtime --version printed: $version" ;;
+esac
 
 [[ -r $APT_KEYRING ]] || die "cannot read the keyring $APT_KEYRING"
 keyring=$(base64 -w0 "$APT_KEYRING") || die "cannot encode the keyring $APT_KEYRING"
-
-work=$(mktemp -d)
-trap 'rm -rf -- "$work"' EXIT
 
 # left prints the seconds left in the budget. SECONDS counts from the start.
 left() { echo $((budget - SECONDS)); }

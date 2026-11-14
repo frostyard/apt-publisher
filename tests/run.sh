@@ -54,6 +54,8 @@ podman=''
 case $1 in
 --version)
 	if [[ -n $podman ]]; then
+		# podman-docker prints this notice to stderr first.
+		echo 'Emulate Docker CLI using podman. Create /etc/containers/nodocker to quiet msg.' >&2
 		echo 'podman version 5.4.2'
 	else
 		echo 'Docker version 27.0.0, build 7d4bcd8'
@@ -1160,6 +1162,13 @@ printf '#!/bin/sh\necho "unknown flag: --version" >&2\nexit 125\n' >"$tmp/no-ver
 chmod +x "$tmp/no-version/runtime"
 must_fail "a runtime without --version is refused" "$tmp/no-version/runtime --version failed: unknown flag: --version" \
 	env APT_CANARY_RUNTIME="$tmp/no-version/runtime" "$ROOT/scripts/install-canary.sh" trixie x=1
+mkdir -p "$tmp/other-runtime"
+printf '#!/bin/sh\necho "nerdctl version 2.0"\necho "podman version 5.4.2"\n' >"$tmp/other-runtime/runtime"
+chmod +x "$tmp/other-runtime/runtime"
+: >"$FAKE_RUNTIME_LOG"
+must_fail "an unknown runtime flavor is refused" \
+	"unknown container runtime: $tmp/other-runtime/runtime --version printed: nerdctl version 2.0$" \
+	env APT_CANARY_RUNTIME="$tmp/other-runtime/runtime" "$ROOT/scripts/install-canary.sh" trixie x=1
 # arch:all routing: amd64 and all rows of 1 target share 1 container, sorted;
 # a duplicate row counts once; an all-only target gets its own container; an
 # arm64 row gets none.

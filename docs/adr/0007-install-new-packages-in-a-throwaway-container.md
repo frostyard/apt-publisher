@@ -70,8 +70,9 @@ install fails `apt-canary.sh`, so the publish run stops before
   of the removal. A failed image pull is
   retried with the canary's tries and delay, inside that limit.
 - **Runtime.** `APT_CANARY_RUNTIME` names the container runtime; the default
-  is `docker`, else `podman`. Without one, the canary fails. No setting turns
-  the install check off.
+  is `docker`, else `podman`. The first stdout line of `RUNTIME --version`
+  names it (`podman version`, `Docker version`); any other runtime, or none,
+  fails the canary. No setting turns the install check off.
 - **Move.** The move workflow runs the same script, so a move and a recheck
   install the reported packages too: an `image` row installs with `main` and
   `image`. Rollback, withdraw and import-stable stay without a canary.
@@ -102,9 +103,9 @@ The download check of ADR-0005 and its retry policy stay as they are.
 - The canary takes more time: about 10 to 50 s for each codename and
   component on 2026-11-13, at most 420 s. The download check's worst case
   (600 s budget, 120 s warm-up, 10 s kill grace) and the install check's
-  (30 s for `RUNTIME --version` plus a 5 s kill grace, 420 s budget, 10 s
-  kill grace, 30 s cleanup, 5 s kill grace) come to 1230 s; they leave the
-  other steps about 9 minutes of the 30-minute job.
+  (420 s budget, which also counts the runtime's `--version` check, 10 s
+  kill grace, 30 s cleanup, 5 s kill grace) come to 1195 s; they leave the
+  other steps about 10 minutes of the 30-minute job.
 - A package whose `postinst` fails without systemd, as `kapsule` does today,
   cannot pass a publish run until its producer fixes it.
 - A recheck of a move installs every newest `image` package of a codename in
