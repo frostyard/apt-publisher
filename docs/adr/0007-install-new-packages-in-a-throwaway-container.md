@@ -58,11 +58,16 @@ install fails `apt-canary.sh`, so the publish run stops before
 - **Isolation.** The container gets 4 environment values: the keyring
   (base64), the public URL, the codename and the components. It gets no
   mount, no other environment value and no extra privilege, so no secret of
-  the job reaches it.
+  the job reaches it. podman forwards the host's proxy variables by default,
+  so the canary passes `--http-proxy=false` to podman. Docker adds proxy
+  values only from the client's own `config.json`, which the runner does not
+  set.
 - **Time.** The install check has its own hard limit,
   `APT_CANARY_INSTALL_BUDGET` (420 s), for the image pulls and the container
   runs together, apart from the download budget. A container that outlasts
-  it is removed, and the canary fails with its log. A failed image pull is
+  it is removed by name, under its own limit (`APT_CANARY_CLEANUP`, 30 s,
+  plus a 5 s kill grace), and the canary fails with its log and the result
+  of the removal. A failed image pull is
   retried with the canary's tries and delay, inside that limit.
 - **Runtime.** `APT_CANARY_RUNTIME` names the container runtime; the default
   is `docker`, else `podman`. Without one, the canary fails. No setting turns
@@ -96,9 +101,10 @@ The download check of ADR-0005 and its retry policy stay as they are.
   download check.
 - The canary takes more time: about 10 to 50 s for each codename and
   component on 2026-11-13, at most 420 s. The download check's worst case
-  (600 s budget, 120 s warm-up) and this limit, each with a 10 s kill grace,
-  come to 1160 s; they leave the other steps about 10 minutes of the
-  30-minute job.
+  (600 s budget, 120 s warm-up, 10 s kill grace) and the install check's
+  (30 s for `RUNTIME --version` plus a 5 s kill grace, 420 s budget, 10 s
+  kill grace, 30 s cleanup, 5 s kill grace) come to 1230 s; they leave the
+  other steps about 9 minutes of the 30-minute job.
 - A package whose `postinst` fails without systemd, as `kapsule` does today,
   cannot pass a publish run until its producer fixes it.
 - A recheck of a move installs every newest `image` package of a codename in

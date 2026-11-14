@@ -16,6 +16,9 @@
 #
 # The container gets only the CANARY_* values (keyring, URL, suite,
 # components): no mount, no other environment value, no extra privilege.
+# Podman copies the host's proxy variables (which can hold credentials) into
+# a container by default, so a podman runtime (also behind a docker name: its
+# --version starts with "podman") runs with --http-proxy=false.
 # There is no setting that turns the install check off.
 #
 # Tunables, read from the environment:
@@ -30,6 +33,9 @@
 #                              limit: each command runs under it (plus a 10 s
 #                              kill grace), and a container that it stops is
 #                              removed by name.
+#   APT_CANARY_CLEANUP         seconds for that removal, at least 1 (30),
+#                              plus a 5 s kill grace. The worst case of 1
+#                              call is BUDGET + 10 s + CLEANUP + 5 s.
 # Only an image pull is retried. A failed install is not: it fails at once
 # with the end of the container's log (inside the container, apt retries each
 # fetch 3 times).
@@ -42,6 +48,7 @@ require awk base64 timeout
 tries=$(tunable APT_CANARY_TRIES 4 1)
 delay=$(tunable APT_CANARY_DELAY 30 0)
 budget=$(tunable APT_CANARY_INSTALL_BUDGET 420 1)
+cleanup=$(tunable APT_CANARY_CLEANUP 30 1)
 image_base=${APT_CANARY_IMAGE:-docker.io/library/debian}
 [[ $image_base =~ ^[A-Za-z0-9][A-Za-z0-9./_:-]*$ ]] || die "invalid APT_CANARY_IMAGE $image_base"
 
@@ -59,6 +66,11 @@ elif command -v podman >/dev/null; then
 else
 	die "the install canary needs docker or podman (or APT_CANARY_RUNTIME)"
 fi
+
+# A podman runtime gets --http-proxy=false on each run.
+version=$(timeout -k 5 30 "$runtime" --version </dev/null 2>&1) || die "$runtime --version failed: $version"
+run_opts=()
+[[ $version != podman* ]] || run_opts=(--http-proxy=false)
 
 [[ -r $APT_KEYRING ]] || die "cannot read the keyring $APT_KEYRING"
 keyring=$(base64 -w0 "$APT_KEYRING") || die "cannot encode the keyring $APT_KEYRING"
@@ -170,13 +182,19 @@ install_check() {
 	t0=$SECONDS
 	pull "$image"
 	name=apt-canary-$$-$RANDOM
-	bounded "$work/run.log" "the install of $target/amd64" "$runtime" run --rm --pull=never --name "$name" \
+	bounded "$work/run.log" "the install of $target/amd64" "$runtime" run --rm --pull=never "${run_opts[@]}" --name "$name" \
 		-e "CANARY_KEYRING=$keyring" -e "CANARY_URL=$APT_PUBLIC_URL" -e "CANARY_SUITE=$codename" \
 		-e "CANARY_COMPONENTS=$components" "$image" \
 		bash -c "$(declare -f guest); guest \"\$@\"" install-canary "$@" || rc=$?
 	if ((rc == 124)); then
-		timeout 60 "$runtime" rm -f "$name" >/dev/null 2>&1 || true
-		die "the install canary budget of ${budget}s is spent; stopped the install of $target/amd64: $(tail_log "$work/run.log")"
+		local removed rm_rc=0
+		timeout -k 5 "$cleanup" "$runtime" rm -f "$name" </dev/null >"$work/rm.log" 2>&1 || rm_rc=$?
+		if ((rm_rc == 0)); then
+			removed="removed container $name"
+		else
+			removed="could not remove container $name (status $rm_rc): $(tail -n 5 "$work/rm.log")"
+		fi
+		die "the install canary budget of ${budget}s is spent; stopped the install of $target/amd64; $removed: $(tail_log "$work/run.log")"
 	fi
 	((rc == 0)) || die "install canary of $target/amd64 failed: $(tail_log "$work/run.log")"
 	log "install canary $target/amd64: $* ($((SECONDS - t0))s)"

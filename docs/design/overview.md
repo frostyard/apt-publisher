@@ -183,7 +183,8 @@ with the public URL as the only Frostyard source (`main`, plus `image` for an
 scripts, without systemd and with every service start denied. `arm64`
 packages get the download check only. The install check has its own time
 limit (`APT_CANARY_INSTALL_BUDGET`, 420 s), and the job's secrets never reach
-the container
+the container (with podman, `--http-proxy=false` keeps the host's proxy
+variables out)
 ([ADR-0007](../adr/0007-install-new-packages-in-a-throwaway-container.md)).
 
 ### Codenames and versions

@@ -39,14 +39,27 @@ export APT_PUBLISH_RETRY_DELAYS='0 0'
 # every line also to $FAKE_RUNTIME_LOG.all, which no case clears. A run logs
 # "BAD ..." for a mount, a privilege, an environment value other than the 4
 # CANARY_* ones, a keyring that is not $APT_KEYRING, or a guest script that
-# bash cannot parse. FAKE_PULL_STATUS fails a pull, FAKE_RUN_SLEEP delays a
-# run, and FAKE_RUN_STATUS fails it with a dpkg error.
+# bash cannot parse. FAKE_FLAVOR=podman makes it answer --version as podman
+# and require --http-proxy=false on a run (logged as "opt --http-proxy=false");
+# the docker flavor (the default) refuses that flag. FAKE_PULL_STATUS fails a
+# pull, FAKE_RUN_SLEEP delays a run, FAKE_RUN_STATUS fails it with a dpkg
+# error, and FAKE_RM_HANG=SECONDS makes rm ignore SIGTERM and sleep that long.
 mkdir -p "$tmp/fake-runtime"
 cat >"$tmp/fake-runtime/runtime" <<'EOF'
 #!/usr/bin/env bash
 set -u
 rec() { printf '%s\n' "$*" | tee -a "$FAKE_RUNTIME_LOG.all" >>"$FAKE_RUNTIME_LOG"; }
+podman=''
+[[ ${FAKE_FLAVOR:-docker} != podman ]] || podman=1
 case $1 in
+--version)
+	if [[ -n $podman ]]; then
+		echo 'podman version 5.4.2'
+	else
+		echo 'Docker version 27.0.0, build 7d4bcd8'
+	fi
+	exit 0
+	;;
 pull)
 	rec "pull ${*: -1}"
 	if ((${FAKE_PULL_STATUS:-0} != 0)); then
@@ -57,14 +70,22 @@ pull)
 	;;
 rm)
 	rec "rm ${*: -1}"
+	if [[ -n ${FAKE_RM_HANG:-} ]]; then
+		trap '' TERM
+		exec sleep "$FAKE_RM_HANG"
+	fi
 	exit 0
 	;;
 run)
 	shift
-	suite='' components='' keyring=''
+	suite='' components='' keyring='' proxy_off=''
 	while (($#)); do
 		case $1 in
 		--rm | --pull=never) shift ;;
+		--http-proxy=false)
+			proxy_off=1
+			shift
+			;;
 		--name) shift 2 ;;
 		-e)
 			case ${2%%=*} in
@@ -83,6 +104,13 @@ run)
 		*) break ;;
 		esac
 	done
+	if [[ -n $podman && -z $proxy_off ]]; then
+		rec "BAD ARG podman run without --http-proxy=false"
+	elif [[ -z $podman && -n $proxy_off ]]; then
+		rec "BAD ARG --http-proxy=false"
+	elif [[ -n $proxy_off ]]; then
+		rec "opt --http-proxy=false"
+	fi
 	image=$1
 	shift
 	if [[ $1 != bash || $2 != -c || $4 != install-canary ]]; then
@@ -593,6 +621,18 @@ must_pass "the canary checks an arm64-only report" run apt-canary.sh --report "$
 check "an arm64-only report runs no install" test "$(runs)" = 0
 check "an arm64-only report says that nothing installs" \
 	grep -qx 'install canary: the report has no amd64 or all row; nothing to install' "$tmp/err"
+# The imported arch:all docs-thing joins the amd64 row of its target.
+{
+	grep -P '^trixie\t.*\tamd64\t' "$tmp/report.tsv"
+	printf 'trixie\tdocs-thing\t1.0\tall\tmain\n'
+	printf 'trixie\tdocs-thing\t1.0\tall\tmain\n'
+	grep -P '^forky\t.*\tarm64\t' "$tmp/report.tsv"
+} >"$tmp/all-pub-report.tsv"
+: >"$FAKE_RUNTIME_LOG"
+must_pass "the canary checks a report with an arch:all row" run apt-canary.sh --report "$tmp/all-pub-report.tsv"
+check "the arch:all row downloads with amd64" grep -q '^canary trixie/amd64: docs-thing=1.0 frostyard-updex=2.0.2$' "$tmp/err"
+check "the arch:all row installs in the amd64 container" test "$(grep '^run ' "$FAKE_RUNTIME_LOG")" = \
+	'run docker.io/library/debian:trixie trixie main docs-thing=1.0 frostyard-updex=2.0.2'
 
 must_pass "publish bootc" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/bootc"
 check "trixie gets the ~deb13 build" listed trixie bootc '1.16.8-1~deb13'
@@ -1096,6 +1136,48 @@ must_fail "a pull pause beyond the budget fails the install canary" "(the instal
 must_fail "the budget stops a hanging install" "the install canary budget of 2s is spent; stopped the install of trixie/amd64" \
 	env FAKE_RUN_SLEEP=30 APT_CANARY_INSTALL_BUDGET=2 "$ROOT/scripts/install-canary.sh" trixie x=1
 check "the stopped container is removed by name" grep -Eq '^rm apt-canary-[0-9]+-[0-9]+$' "$FAKE_RUNTIME_LOG"
+check "the removal is reported" grep -Eq 'spent; stopped the install of trixie/amd64; removed container apt-canary-[0-9]+-[0-9]+: ' "$tmp/err"
+# A removal that ignores SIGTERM: the kill grace ends it, and the canary says
+# that the container may remain. The odd sleep length finds a stray process.
+: >"$FAKE_RUNTIME_LOG"
+t0=$SECONDS
+must_fail "a hanging removal is stopped" "could not remove container apt-canary-[0-9]*-[0-9]* (status 137)" \
+	env FAKE_RUN_SLEEP=30 FAKE_RM_HANG=97.31 APT_CANARY_CLEANUP=1 APT_CANARY_INSTALL_BUDGET=2 \
+	"$ROOT/scripts/install-canary.sh" trixie x=1
+check "a hanging removal keeps the budget message" grep -q 'the install canary budget of 2s is spent; stopped the install of trixie/amd64' "$tmp/err"
+check "a hanging removal ends within 20s" test $((SECONDS - t0)) -le 20
+check "the kill grace leaves no hanging removal" test -z "$(pgrep -fx 'sleep 97.31' || true)"
+must_fail "a zero cleanup time is refused" "APT_CANARY_CLEANUP must be an integer >= 1 (got: 0)" \
+	env APT_CANARY_CLEANUP=0 "$ROOT/scripts/install-canary.sh" trixie x=1
+# Podman forwards the host's proxy variables unless --http-proxy=false.
+: >"$FAKE_RUNTIME_LOG"
+must_pass "a podman runtime installs" env FAKE_FLAVOR=podman HTTPS_PROXY=http://user:secret@proxy.invalid:3128 \
+	"$ROOT/scripts/install-canary.sh" trixie x=1
+check "a podman run gets --http-proxy=false" \
+	test "$(cat "$FAKE_RUNTIME_LOG")" = "$(printf 'pull docker.io/library/debian:trixie\nopt --http-proxy=false\nrun docker.io/library/debian:trixie trixie main x=1')"
+mkdir -p "$tmp/no-version"
+printf '#!/bin/sh\necho "unknown flag: --version" >&2\nexit 125\n' >"$tmp/no-version/runtime"
+chmod +x "$tmp/no-version/runtime"
+must_fail "a runtime without --version is refused" "$tmp/no-version/runtime --version failed: unknown flag: --version" \
+	env APT_CANARY_RUNTIME="$tmp/no-version/runtime" "$ROOT/scripts/install-canary.sh" trixie x=1
+# arch:all routing: amd64 and all rows of 1 target share 1 container, sorted;
+# a duplicate row counts once; an all-only target gets its own container; an
+# arm64 row gets none.
+printf '%s\t%s\t%s\t%s\t%s\n' \
+	trixie frostyard-updex 2.0.2 amd64 main \
+	trixie docs-thing 1.0 all main \
+	trixie docs-thing 1.0 all main \
+	trixie imgdoc 2.0 all image \
+	forky frostyard-updex 2.0.2 arm64 main >"$tmp/all-report.tsv"
+printf 'forky\tdocs-thing\t1.0\tall\n' >>"$tmp/all-report.tsv"
+: >"$FAKE_RUNTIME_LOG"
+must_pass "the install canary routes arch:all rows" install_canary --report "$tmp/all-report.tsv"
+check "arch:all rows give the exact runs" test "$(grep '^run ' "$FAKE_RUNTIME_LOG")" = "$(printf '%s\n' \
+	'run docker.io/library/debian:forky forky main docs-thing=1.0' \
+	'run docker.io/library/debian:trixie trixie main image imgdoc=2.0' \
+	'run docker.io/library/debian:trixie trixie main docs-thing=1.0 frostyard-updex=2.0.2')"
+check "the arm64 row of the arch:all report is not installed" \
+	grep -qx 'install canary forky/arm64: not installed, the runner is amd64 (download check only)' "$tmp/err"
 must_fail "an unknown runtime is refused" "APT_CANARY_RUNTIME /nonexistent is not an executable file" \
 	env APT_CANARY_RUNTIME=/nonexistent "$ROOT/scripts/install-canary.sh" trixie x=1
 must_fail "a runtime that is not on PATH is refused" "APT_CANARY_RUNTIME no-such-runtime is not on PATH" \

@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-13",
+  "scope": "scripts",
+  "correction": "Explicit -e values do not limit what podman run passes into a container: podman forwards the host proxy variables by default (--http-proxy=true), so the install canary must pass --http-proxy=false to podman to keep the job environment out of the container",
+  "evidence": "frostyard/apt-publisher#55, cross-review of head 5f062ab (openai/gpt-6.1-sol)",
+  "promoted_to": "tests/run.sh"
+}
