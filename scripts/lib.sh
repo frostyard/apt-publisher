@@ -26,6 +26,17 @@ require() {
 	done
 }
 
+# tunable NAME DEFAULT MIN prints the value of environment variable NAME, an
+# integer of at least MIN, or DEFAULT when NAME is unset. It dies on any other
+# value. The canaries read their settings with it.
+tunable() {
+	local v=${!1-$2}
+	if [[ ! $v =~ ^[0-9]+$ ]] || ((10#$v < $3)); then
+		die "$1 must be an integer >= $3 (got: $v)"
+	fi
+	printf '%d\n' "$((10#$v))"
+}
+
 in_csv() { [[ ",$2," == *",$1,"* ]]; }
 
 # matches_globs NAME GLOB[,GLOB...]

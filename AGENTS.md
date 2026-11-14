@@ -62,6 +62,11 @@ the signing workflow and ref that an attested producer names.
   `main` path for a main-only codename.
 - Check snapshot existence with `snapshot_exists`, not `aptly snapshot show`,
   which fails once a snapshot's source repository has been rebuilt.
+- The canary installs the new `amd64` and `all` packages in a throwaway
+  container after the download check passes (`scripts/install-canary.sh`,
+  ADR-0007). The container gets only the `CANARY_*` environment values
+  (keyring, URL, suite, components): no mount, no secret, no extra privilege.
+  No setting turns the install check off; tests use a fake runtime.
 - Secrets arrive only through the environment (`R2_*`, `APT_SIGNING_KEY`,
   `CLOUDFLARE_*`, `GH_TOKEN`). Never write them to `aptly.conf` or logs.
 - Request values (`repo`, `tag`, `codenames`) reach scripts through `env:`,

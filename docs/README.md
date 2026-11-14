@@ -24,6 +24,7 @@ Docs are split by the question they answer:
 - [0004 — Pin the signer workflow of attested producers](adr/0004-pin-the-signer-workflow-of-attested-producers.md)
 - [0005 — Check publications with an apt download canary](adr/0005-check-publications-with-an-apt-download-canary.md)
 - [0006 — State the reason for the incus signer ref](adr/0006-state-the-reason-for-the-incus-signer-ref.md)
+- [0007 — Install new packages in a throwaway container](adr/0007-install-new-packages-in-a-throwaway-container.md)
 
 ### Design
 

@@ -34,6 +34,84 @@ trap cleanup EXIT
 export APT_CANARY_DELAY=0
 export APT_PUBLISH_RETRY_DELAYS='0 0'
 
+# The install canary runs a fake container runtime. It logs "pull IMAGE",
+# "run IMAGE SUITE COMPONENTS SPEC..." and "rm NAME" to $FAKE_RUNTIME_LOG, and
+# every line also to $FAKE_RUNTIME_LOG.all, which no case clears. A run logs
+# "BAD ..." for a mount, a privilege, an environment value other than the 4
+# CANARY_* ones, a keyring that is not $APT_KEYRING, or a guest script that
+# bash cannot parse. FAKE_PULL_STATUS fails a pull, FAKE_RUN_SLEEP delays a
+# run, and FAKE_RUN_STATUS fails it with a dpkg error.
+mkdir -p "$tmp/fake-runtime"
+cat >"$tmp/fake-runtime/runtime" <<'EOF'
+#!/usr/bin/env bash
+set -u
+rec() { printf '%s\n' "$*" | tee -a "$FAKE_RUNTIME_LOG.all" >>"$FAKE_RUNTIME_LOG"; }
+case $1 in
+pull)
+	rec "pull ${*: -1}"
+	if ((${FAKE_PULL_STATUS:-0} != 0)); then
+		echo "Error: fake pull of ${*: -1} failed" >&2
+		exit "$FAKE_PULL_STATUS"
+	fi
+	exit 0
+	;;
+rm)
+	rec "rm ${*: -1}"
+	exit 0
+	;;
+run)
+	shift
+	suite='' components='' keyring=''
+	while (($#)); do
+		case $1 in
+		--rm | --pull=never) shift ;;
+		--name) shift 2 ;;
+		-e)
+			case ${2%%=*} in
+			CANARY_SUITE) suite=${2#*=} ;;
+			CANARY_COMPONENTS) components=${2#*=} ;;
+			CANARY_KEYRING) keyring=${2#*=} ;;
+			CANARY_URL) ;;
+			*) rec "BAD ARG -e ${2%%=*}" ;;
+			esac
+			shift 2
+			;;
+		-*)
+			rec "BAD ARG $1"
+			shift
+			;;
+		*) break ;;
+		esac
+	done
+	image=$1
+	shift
+	if [[ $1 != bash || $2 != -c || $4 != install-canary ]]; then
+		rec "BAD ARG command $1 $2"
+	else
+		bash -n -c "$3" 2>/dev/null || rec "BAD SCRIPT"
+		shift 4
+	fi
+	base64 -d <<<"$keyring" | cmp -s - "$APT_KEYRING" || rec "BAD KEYRING"
+	rec "run $image $suite $components $*"
+	[[ -z ${FAKE_RUN_SLEEP:-} ]] || sleep "$FAKE_RUN_SLEEP"
+	if ((${FAKE_RUN_STATUS:-0} != 0)); then
+		echo "dpkg: error processing package $1 (--configure):"
+		exit "$FAKE_RUN_STATUS"
+	fi
+	printf 'installed %s\n' "$@"
+	exit 0
+	;;
+esac
+rec "BAD ARG runtime $1"
+exit 2
+EOF
+chmod +x "$tmp/fake-runtime/runtime"
+export APT_CANARY_RUNTIME=$tmp/fake-runtime/runtime FAKE_RUNTIME_LOG=$tmp/runtime.log
+: >"$FAKE_RUNTIME_LOG"
+: >"$FAKE_RUNTIME_LOG.all"
+# runs PATTERN prints the number of run lines of the runtime log that match PATTERN.
+runs() { grep -c "^run ${1-}" "$FAKE_RUNTIME_LOG" || true; }
+
 n=0
 ok() {
 	n=$((n + 1))
@@ -482,7 +560,39 @@ check "apt on trixie/amd64 sees 2.0.2" candidate_is trixie amd64 frostyard-updex
 check "apt on forky/arm64 sees 2.0.2" candidate_is forky arm64 frostyard-updex 2.0.2
 check "both codenames share one pool file" \
 	test "$(find "$pub/pool" -name 'frostyard-updex_2.0.2_amd64.deb' | wc -l)" = 1
+: >"$FAKE_RUNTIME_LOG"
 must_pass "the canary installs the report through the public URL" run apt-canary.sh --report "$tmp/report.tsv"
+check "the install canary runs 2 containers, 1 per codename" test "$(runs)" = 2
+check "the install canary installs updex on trixie main" \
+	test "$(runs 'docker.io/library/debian:trixie trixie main frostyard-updex=2.0.2$')" = 1
+check "the install canary installs updex on forky main" \
+	test "$(runs 'docker.io/library/debian:forky forky main frostyard-updex=2.0.2$')" = 1
+check "the install canary pulls each image once" \
+	test "$(grep -c '^pull docker.io/library/debian:\(trixie\|forky\)$' "$FAKE_RUNTIME_LOG")" = 2
+check "the install canary logs the installs" grep -q '^install canary trixie/amd64: frostyard-updex=2.0.2 ([0-9]*s)$' "$tmp/err"
+check "the install canary logs the arm64 rows as not installed" \
+	grep -qx 'install canary forky/arm64: not installed, the runner is amd64 (download check only)' "$tmp/err"
+: >"$FAKE_RUNTIME_LOG"
+# The report's groups install in sorted order: forky comes first.
+must_fail "a failed install fails the canary" "install canary of forky/amd64 failed" \
+	env FAKE_RUN_STATUS=100 "$ROOT/scripts/apt-canary.sh" --report "$tmp/report.tsv"
+check "the failed install shows the dpkg error" \
+	grep -q 'dpkg: error processing package frostyard-updex=2.0.2 (--configure):' "$tmp/err"
+check "the install runs after every download passed" grep -q '^canary forky/arm64: ' "$tmp/err"
+check "the failed install stops at the first container" test "$(runs)" = 1
+grep -P '^trixie\t' "$tmp/report.tsv" >"$tmp/trixie-report.tsv"
+must_fail "a failed trixie install names trixie" "install canary of trixie/amd64 failed" \
+	env FAKE_RUN_STATUS=100 "$ROOT/scripts/apt-canary.sh" --report "$tmp/trixie-report.tsv"
+: >"$FAKE_RUNTIME_LOG"
+must_pass "the canary checks a single arm64 target" run apt-canary.sh forky arm64 frostyard-updex=2.0.2
+check "a single arm64 target runs no install" test "$(runs)" = 0
+check "a single arm64 target logs the skipped install" \
+	grep -qx 'install canary forky/arm64: not installed, the runner is amd64 (download check only)' "$tmp/err"
+grep -P '\tarm64\t' "$tmp/report.tsv" >"$tmp/arm64-report.tsv"
+must_pass "the canary checks an arm64-only report" run apt-canary.sh --report "$tmp/arm64-report.tsv"
+check "an arm64-only report runs no install" test "$(runs)" = 0
+check "an arm64-only report says that nothing installs" \
+	grep -qx 'install canary: the report has no amd64 or all row; nothing to install' "$tmp/err"
 
 must_pass "publish bootc" run publish.sh --producer frostyard/bootc-debian --debs "$tmp/bootc"
 check "trixie gets the ~deb13 build" listed trixie bootc '1.16.8-1~deb13'
@@ -771,7 +881,10 @@ must_pass "verify accepts the published suite" \
 must_fail "verify rejects a missing version" "does not list" run verify.sh trixie frostyard-updex=9.9
 must_fail "verify rejects a version that should be gone" "still lists" \
 	run verify.sh forky '!frostyard-updex=2.0.2'
+: >"$FAKE_RUNTIME_LOG"
 must_pass "the canary installs from trixie" run apt-canary.sh trixie amd64 trixie-thing=1.1 frostyard-updex=2.0.1
+check "a single amd64 target runs 1 install with its specs" \
+	test "$(runs)" = 1 -a "$(runs 'docker.io/library/debian:trixie trixie main trixie-thing=1.1 frostyard-updex=2.0.1$')" = 1
 
 corrupt "$(cd "$pub" && find pool -name 'trixie-thing_1.1_amd64.deb')"
 must_pass "metadata-only verify cannot see a corrupted package" run verify.sh trixie
@@ -879,7 +992,9 @@ must_fail "the canary fails when every fetch gives 503" "apt-get download trixie
 check "it tried TRIES times, no more" test "$(retry_lines)" = 2
 serve_ctl
 rm "$tmp/http-pub/$thing_pool"
+: >"$FAKE_RUNTIME_LOG"
 must_fail "a 404 fails the canary" "404" canary_http
+check "a failed download runs no install" test "$(runs)" = 0
 check "a 404 is not retried" test "$(retry_lines)" = 0
 printf 'corrupted bytes\n' >"$tmp/http-pub/$thing_pool"
 must_fail "a size mismatch fails the canary" "apt-get download trixie-thing=1.1 from trixie/amd64 failed (try 1 of 4)" canary_http
@@ -890,8 +1005,10 @@ must_fail "a hash mismatch fails the canary" "Hash Sum mismatch" canary_http
 check "a hash mismatch is not retried" test "$(retry_lines)" = 0
 cp "$pub/$thing_pool" "$tmp/http-pub/$thing_pool"
 must_pass "the canary passes with the file restored" canary_http
+: >"$FAKE_RUNTIME_LOG"
 must_fail "a bad signature fails the canary" "apt-get update of trixie/amd64 failed (try 3 of 3)" \
 	canary_http APT_KEYRING="$tmp/other-key.gpg" APT_CANARY_TRIES=3
+check "a bad signature runs no install" test "$(runs)" = 0
 check "the update was tried TRIES times" test "$(retry_lines)" = 2
 must_fail "a bad tunable is refused" "APT_CANARY_TRIES must be an integer >= 1 (got: x)" canary_http APT_CANARY_TRIES=x
 must_fail "zero tries are refused" "APT_CANARY_TRIES must be an integer >= 1" canary_http APT_CANARY_TRIES=0
@@ -952,6 +1069,52 @@ apt_class "an apt 2.7 timeout is retried" 3 "$hdr" '  Connection timed out [IP: 
 	"E: Failed to fetch $url  Connection timed out [IP: 192.0.2.1 443]"
 apt_class "a 404 on port 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192.0.2.1 503]' \
 	"E: Failed to fetch http://repo.invalid:503/x_503_amd64.deb  404  Not Found [IP: 192.0.2.1 503]"
+
+# --- install canary ---------------------------------------------------------------
+#
+# install-canary.sh against the fake runtime: the pull retries, the budget, the
+# refusals. The fake runtime never reads the public URL.
+install_canary() { "$ROOT/scripts/install-canary.sh" "$@"; }
+: >"$FAKE_RUNTIME_LOG"
+must_pass "the install canary installs 1 target" install_canary trixie trixie-thing=1.1
+check "the install canary pulls, then runs" \
+	test "$(cat "$FAKE_RUNTIME_LOG")" = "$(printf 'pull docker.io/library/debian:trixie\nrun docker.io/library/debian:trixie trixie main trixie-thing=1.1')"
+: >"$FAKE_RUNTIME_LOG"
+must_pass "APT_CANARY_IMAGE names the image" env APT_CANARY_IMAGE=registry.invalid/debian "$ROOT/scripts/install-canary.sh" forky x=1
+check "the image takes the codename as its tag" test "$(runs 'registry.invalid/debian:forky forky main x=1$')" = 1
+: >"$FAKE_RUNTIME_LOG"
+must_fail "a pull that always fails fails the install canary" \
+	"$APT_CANARY_RUNTIME pull docker.io/library/debian:trixie failed (try 2 of 2): Error: fake pull" \
+	env FAKE_PULL_STATUS=1 APT_CANARY_TRIES=2 "$ROOT/scripts/install-canary.sh" trixie x=1
+check "the failed pull was tried 2 times" test "$(grep -c '^pull ' "$FAKE_RUNTIME_LOG")" = 2
+check "the failed pull try is logged" \
+	grep -q "install canary: $APT_CANARY_RUNTIME pull docker.io/library/debian:trixie failed (try 1 of 2): Error: fake pull.*; retrying in 0s" "$tmp/err"
+check "a failed pull runs no container" test "$(runs)" = 0
+must_fail "a pull pause beyond the budget fails the install canary" "(the install canary budget of 2s is spent)" \
+	env FAKE_PULL_STATUS=1 APT_CANARY_DELAY=5 APT_CANARY_INSTALL_BUDGET=2 "$ROOT/scripts/install-canary.sh" trixie x=1
+: >"$FAKE_RUNTIME_LOG"
+must_fail "the budget stops a hanging install" "the install canary budget of 2s is spent; stopped the install of trixie/amd64" \
+	env FAKE_RUN_SLEEP=30 APT_CANARY_INSTALL_BUDGET=2 "$ROOT/scripts/install-canary.sh" trixie x=1
+check "the stopped container is removed by name" grep -Eq '^rm apt-canary-[0-9]+-[0-9]+$' "$FAKE_RUNTIME_LOG"
+must_fail "an unknown runtime is refused" "APT_CANARY_RUNTIME /nonexistent is not an executable file" \
+	env APT_CANARY_RUNTIME=/nonexistent "$ROOT/scripts/install-canary.sh" trixie x=1
+must_fail "a runtime that is not on PATH is refused" "APT_CANARY_RUNTIME no-such-runtime is not on PATH" \
+	env APT_CANARY_RUNTIME=no-such-runtime "$ROOT/scripts/install-canary.sh" trixie x=1
+mkdir -p "$tmp/no-runtime"
+for tool in bash dirname awk base64 timeout mktemp; do ln -sf "$(command -v "$tool")" "$tmp/no-runtime/$tool"; done
+must_fail "no runtime at all is refused" "the install canary needs docker or podman" \
+	env -u APT_CANARY_RUNTIME PATH="$tmp/no-runtime" "$tmp/no-runtime/bash" "$ROOT/scripts/install-canary.sh" trixie x=1
+must_fail "a zero install budget is refused" "APT_CANARY_INSTALL_BUDGET must be an integer >= 1 (got: 0)" \
+	env APT_CANARY_INSTALL_BUDGET=0 "$ROOT/scripts/install-canary.sh" trixie x=1
+must_fail "an unknown runtime fails apt-canary.sh" "APT_CANARY_RUNTIME /nonexistent is not an executable file" \
+	canary_http APT_CANARY_RUNTIME=/nonexistent
+: >"$FAKE_RUNTIME_LOG"
+must_fail "a bad codename is refused" "invalid codename" install_canary 'trixie;x' x=1
+must_fail "a bad component is refused" "invalid component" install_canary 'trixie/Image' x=1
+must_fail "a spec without a version is refused" "invalid package spec x" install_canary trixie x
+must_fail "a spec that looks like an option is refused" "invalid package spec --x=1" install_canary trixie --x=1
+must_fail "a spec with a space is refused" "invalid package spec" install_canary trixie 'x=1 2'
+check "a refused value reaches no runtime" test ! -s "$FAKE_RUNTIME_LOG"
 
 # Another writer's stanza, appended to the published index.
 {
@@ -1433,8 +1596,14 @@ check "apt with Components: main has no candidate" candidate_is trixie amd64 img
 check "apt with both components sees it" candidate_is trixie amd64 imgpkg 1.0 'main image'
 check "an image publication leaves the main indexes byte-identical" test "$(index_sum trixie main)" = "$main_sum"
 check "the report row names image" grep -qxP 'trixie\timgpkg\t1.0\tamd64\timage' "$tmp/c-img-report.tsv"
+: >"$FAKE_RUNTIME_LOG"
 must_pass "the canary reads the image component" run apt-canary.sh --report "$tmp/c-img-report.tsv"
+check "an image report installs with main and image" test "$(runs 'docker.io/library/debian:trixie trixie main image imgpkg=1.0$')" = 1
+check "an image report runs 1 container" test "$(runs)" = 1
+check "the image install is logged with its component" grep -q '^install canary trixie/image/amd64: imgpkg=1.0 (' "$tmp/err"
+: >"$FAKE_RUNTIME_LOG"
 must_pass "the canary takes CODENAME/COMPONENT" run apt-canary.sh trixie/image amd64 imgpkg=1.0
+check "CODENAME/COMPONENT installs with main and image" test "$(runs 'docker.io/library/debian:trixie trixie main image imgpkg=1.0$')" = 1
 must_fail "the canary finds no image package in main" "apt-get download imgpkg=1.0" \
 	run apt-canary.sh trixie amd64 imgpkg=1.0
 must_pass "verify accepts image/NAME=VERSION" run verify.sh trixie image/imgpkg=1.0
@@ -3007,5 +3176,9 @@ EOF
 chmod +x "$tmp/shim-awk/awk"
 must_fail "the workflow shell contract reports shell scan failure" "the shell scan failed" \
 	env "PATH=$tmp/shim-awk:$PATH" "$tmp/cfg/tests/check-config.sh"
+
+check "the install canary ran containers in this test" test "$(grep -c '^run ' "$FAKE_RUNTIME_LOG.all")" -gt 10
+check "no container got a mount, a privilege, another environment value or a bad guest" \
+	lacks '^BAD' "$FAKE_RUNTIME_LOG.all"
 
 echo "1..$n"

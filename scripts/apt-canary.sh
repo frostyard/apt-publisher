@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# Install-path canary: point a sandboxed apt (no root, no system state) at
-# APT_PUBLIC_URL, run apt-get update, and download each package with
-# apt-get download, so apt itself checks the signature, the indexes and the
-# package hashes through the public delivery path (CDN included).
+# Install-path canary, in 2 steps through the public delivery path (CDN
+# included):
+#   1. The download check: point a sandboxed apt (no root, no system state) at
+#      APT_PUBLIC_URL, run apt-get update, and download each package with
+#      apt-get download, so apt itself checks the signature, the indexes and
+#      the package hashes.
+#   2. The install check, only after every download passed: install-canary.sh
+#      installs the amd64 and arch:all packages with apt-get install in a
+#      throwaway debian:CODENAME container. Other architectures get the
+#      download check only (the runner is amd64). See install-canary.sh for
+#      its tunables and its own budget.
+# A failure in either step fails this script.
 #
 #   apt-canary.sh CODENAME[/COMPONENT] ARCH NAME=VERSION...   (component: main)
 #   apt-canary.sh --report FILE      rows of "codename name version arch component"
 #
 # arch:all packages are fetched with an amd64 apt configuration.
 #
-# This script owns the whole retry policy (apt's own Acquire::Retries is 0, so
-# every try is counted and logged). Tunables, read from the environment:
+# The download check owns its whole retry policy (apt's own Acquire::Retries is
+# 0, so every try is counted and logged). Its tunables, read from the
+# environment (TRIES and DELAY also set the image pulls of install-canary.sh):
 #   APT_CANARY_TIMEOUT  apt http/https timeout, seconds, at least 1, connect and data (120)
 #   APT_CANARY_TRIES    tries per apt-get command, at least 1 (4)
 #   APT_CANARY_DELAY    seconds; the sleep before try n+1 is DELAY*n (30)
@@ -36,14 +45,7 @@
 
 require apt-get curl timeout
 
-# tunable NAME DEFAULT MIN prints the value of environment variable NAME.
-tunable() {
-	local v=${!1-$2}
-	if [[ ! $v =~ ^[0-9]+$ ]] || ((10#$v < $3)); then
-		die "$1 must be an integer >= $3 (got: $v)"
-	fi
-	printf '%d\n' "$((10#$v))"
-}
+install_canary=$(dirname "$0")/install-canary.sh
 timeout=$(tunable APT_CANARY_TIMEOUT 120 1)
 tries=$(tunable APT_CANARY_TRIES 4 1)
 delay=$(tunable APT_CANARY_DELAY 30 0)
@@ -178,8 +180,15 @@ if [[ ${1:-} == --report ]]; then
 			'$1 == c && ($5 == "" ? "main" : $5) == k && ($4 == a || ($4 == "all" && a == "amd64")) { print $2 "=" $3 }' "$2" | sort -u)
 		canary "$codename/$component" "$arch" "${specs[@]}"
 	done < <(awk -F'\t' '{ print $1, ($5 == "" ? "main" : $5), ($4 == "all" ? "amd64" : $4) }' "$2" | sort -u)
-	exit 0
+	# Every download passed: install what the runner can install.
+	exec "$install_canary" --report "$2"
 fi
 
 (($# >= 3)) || die "usage: apt-canary.sh CODENAME[/COMPONENT] ARCH NAME=VERSION... | --report FILE"
 canary "$@"
+if [[ $2 == amd64 ]]; then
+	exec "$install_canary" "$1" "${@:3}"
+fi
+target=${1%%/*}
+[[ $1 != */* || ${1#*/} == main ]] || target+=/${1#*/}
+log "install canary $target/$2: not installed, the runner is amd64 (download check only)"

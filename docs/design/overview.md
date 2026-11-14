@@ -41,7 +41,9 @@ producer tag -> goreleaser -> GitHub release (.deb + build provenance)
      purge-cache.sh     purge InRelease/Release/Packages from the Cloudflare cache
      apt-canary.sh      apt-get update + download of each new package through
                         the public URL; retries a stale index and a transient
-                        fetch, fails at once on a 404 or a bad hash
+                        fetch, fails at once on a 404 or a bad hash; then
+     install-canary.sh  apt-get install of the new amd64 and all packages in
+                        a throwaway debian:<codename> container (ADR-0007)
      notify.sh          dispatch `build` to downstream repositories (snosi)
 ```
 
@@ -171,11 +173,18 @@ Rollbacks and imports also run the deep check: every file the codename lists,
 in every component, must be in the bucket with the index's MD5. Finally, the
 canary runs `apt-get update` and `apt-get download` for each new package
 through the public URL. apt checks the signature, the indexes and the package
-hashes through the CDN. The canary installs nothing, so it does not check
-dependency resolution or maintainer scripts
+hashes through the CDN
 ([ADR-0005](../adr/0005-check-publications-with-an-apt-download-canary.md)).
-An install step in a throwaway container is a planned feature
-([#48](https://github.com/frostyard/apt-publisher/issues/48)).
+When every download passes, `scripts/install-canary.sh` installs the new
+`amd64` and `all` packages with `apt-get install --no-install-recommends`,
+one throwaway `debian:<codename>` container for each codename and component,
+with the public URL as the only Frostyard source (`main`, plus `image` for an
+`image` package). This checks dependency resolution and the maintainer
+scripts, without systemd and with every service start denied. `arm64`
+packages get the download check only. The install check has its own time
+limit (`APT_CANARY_INSTALL_BUDGET`, 420 s), and the job's secrets never reach
+the container
+([ADR-0007](../adr/0007-install-new-packages-in-a-throwaway-container.md)).
 
 ### Codenames and versions
 

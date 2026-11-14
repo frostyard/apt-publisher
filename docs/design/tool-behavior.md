@@ -74,6 +74,18 @@ pinned version changes (`mise.toml`, `mise.lock`).
 
 - `apt-get download` over `file://` verifies hashes, which is why the canary
   corruption test is meaningful.
+- In a `debian:trixie` container (apt 3.0, `sqv`), apt reads a `Signed-By`
+  keyring as its `_apt` user: a mode 0600 keyring fails with "Permission
+  denied" and the source counts as unsigned. The install canary writes it
+  with mode 0644 (seen on 2026-11-13).
+- The `debian:trixie` and `debian:forky` images have no `ca-certificates`,
+  so an `https` source fails until it is installed from the Debian archive.
+  They ship a `policy-rc.d` that exits 101; the install canary writes its own
+  anyway.
+- A `postinst` that runs `systemctl` without a guard fails in a container
+  where systemd is not PID 1 ("System has not been booted with systemd").
+  The install canary therefore fails such a package (`kapsule` 0.1.1 on
+  2026-11-13).
 
 ### gh
 
