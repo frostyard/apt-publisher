@@ -59,6 +59,86 @@ table_field() {
 codename_field() { table_field "$APT_CODENAMES_FILE" "$1" "$2"; }
 producer_field() { table_field "$APT_PRODUCERS_FILE" "$1" "$2"; }
 
+# --- withdrawn versions (ADR-0008) -----------------------------------------------
+#
+# Every file in $APT_WITHDRAWALS_DIR is a batch of "NAME VERSION [ARCH]" rows
+# (withdraw.sh reads the same files). publish.sh refuses a .deb that a row
+# names, so a withdrawn version stays withdrawn when its producer publishes
+# the release again. A row names no codename: it applies to every codename.
+
+# The rows load_withdrawals reads: name, version, architecture ('' for any)
+# and the place of the row ("withdrawals/FILE line N").
+wd_names=() wd_versions=() wd_arches=() wd_refs=()
+
+# load_withdrawals reads every file of the withdrawals directory, in sorted
+# order, into the wd_* arrays. A missing directory holds no row. It fails
+# closed: an entry that is not a readable regular file, or a row that
+# withdraw.sh would refuse, stops the run, since a row that is skipped lets a
+# withdrawn version come back.
+load_withdrawals() {
+	wd_names=() wd_versions=() wd_arches=() wd_refs=()
+	local dir=$APT_WITHDRAWALS_DIR file base line lineno fields
+	[[ -e $dir ]] || return 0
+	[[ -d $dir ]] || die "$dir is not a directory"
+	local had_nullglob=0
+	shopt -q nullglob && had_nullglob=1
+	shopt -s nullglob
+	local files=("$dir"/*)
+	((had_nullglob)) || shopt -u nullglob
+	for file in "${files[@]}"; do
+		base=${file##*/}
+		[[ -f $file && -r $file ]] || die "withdrawals/$base is not a readable regular file"
+		lineno=0
+		while IFS= read -r line || [[ -n $line ]]; do
+			lineno=$((lineno + 1))
+			line=${line%$'\r'}
+			[[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+			read -ra fields <<<"$line"
+			((${#fields[@]} >= 2 && ${#fields[@]} <= 3)) ||
+				die "withdrawals/$base line $lineno: a row is NAME VERSION [ARCH]"
+			[[ ${fields[0]} =~ ^[a-z0-9][a-z0-9.+-]*$ ]] ||
+				die "withdrawals/$base line $lineno: invalid package name ${fields[0]}"
+			[[ ${fields[1]} =~ ^[A-Za-z0-9.+~:-]+$ ]] ||
+				die "withdrawals/$base line $lineno: invalid version ${fields[1]}"
+			[[ -z ${fields[2]:-} || ${fields[2]} =~ ^[a-z0-9]+$ ]] ||
+				die "withdrawals/$base line $lineno: invalid architecture ${fields[2]}"
+			wd_names+=("${fields[0]}")
+			wd_versions+=("${fields[1]}")
+			wd_arches+=("${fields[2]:-}")
+			wd_refs+=("withdrawals/$base line $lineno")
+		done <"$file"
+	done
+}
+
+# withdrawn_by NAME VERSION ARCH succeeds when a loaded row blocks the .deb,
+# and sets wd_hit to that row's place. Call it without a command
+# substitution: the die below must end the run, not a subshell. A row blocks
+# the .deb when the names are equal, the versions are equal by dpkg (so 0:1.0 and 1.0 match), and the row has no
+# architecture or the same one as the .deb: a row for amd64 does not block an
+# Architecture: all package. Versions are compared only for rows of the same
+# name. A version dpkg cannot parse stops the run.
+wd_hit=''
+withdrawn_by() {
+	local i status
+	wd_hit=''
+	for i in "${!wd_names[@]}"; do
+		[[ ${wd_names[i]} == "$1" ]] || continue
+		[[ -z ${wd_arches[i]} || ${wd_arches[i]} == "$3" ]] || continue
+		status=0
+		dpkg --compare-versions "$2" eq "${wd_versions[i]}" 2>/dev/null || status=$?
+		case $status in
+		0)
+			# shellcheck disable=SC2034 # the caller (publish.sh) reads wd_hit
+			wd_hit=${wd_refs[i]}
+			return 0
+			;;
+		1) ;;
+		*) die "dpkg cannot compare version $2 of $1 with ${wd_versions[i]} (${wd_refs[i]})" ;;
+		esac
+	done
+	return 1
+}
+
 # codename_for_major MAJOR prints the configured codename for a Debian major.
 codename_for_major() {
 	awk -F'\t' -v m="$1" '!/^#/ && NF && $2 == m { print $1; found = 1 } END { exit !found }' \

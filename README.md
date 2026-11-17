@@ -73,8 +73,8 @@ retention, rollback, move and recovery.
   release. It reports a withdrawn latest release as missing, by design.
 - A point-in-time rollback also unpublishes other producers' later packages
   until they are republished. Use withdraw for one bad version.
-- A withdrawn version comes back if the same release is republished: there
-  is no blocklist.
+- A re-run of an old publish run, or a rollback to a snapshot that lists it,
+  can bring back a withdrawn version: only new runs read the `withdrawals/` rows.
 
 ## Develop
 

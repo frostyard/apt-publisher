@@ -130,6 +130,12 @@ can still bring the name back, and neither may run after the withdrawal:
 The withdrawal batch and this page must say that neither path may run after
 the withdrawal. Unregistration alone never keeps a name out.
 
+The batch rows also block those versions in new publish runs
+([ADR-0008](../adr/0008-block-withdrawn-versions-from-publication.md)). A
+re-run of an old publish run reads the rows of its own, older commit, which
+lacks them. A rollback does not read rows. So both paths can still bring the
+versions back.
+
 So a retirement lands in one PR: it adds the batch file in `withdrawals/`,
 removes the producer's row, and records the retirement below with the batch
 file's name. Run **withdraw** with the batch (and `dry_run` first) only after

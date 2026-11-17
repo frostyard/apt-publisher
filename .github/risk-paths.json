@@ -40,7 +40,7 @@
     {
       "glob": "withdrawals/**",
       "level": "L1",
-      "why": "destructive operations: batch files that withdraw published packages when the withdraw workflow runs them"
+      "why": "destructive operations: batch files that withdraw published packages when the withdraw workflow runs them; the rows also block those versions from publication (ADR-0008)"
     },
     {
       "glob": "tests/**",

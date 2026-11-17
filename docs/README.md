@@ -25,6 +25,7 @@ Docs are split by the question they answer:
 - [0005 — Check publications with an apt download canary](adr/0005-check-publications-with-an-apt-download-canary.md)
 - [0006 — State the reason for the incus signer ref](adr/0006-state-the-reason-for-the-incus-signer-ref.md)
 - [0007 — Install new packages in a throwaway container](adr/0007-install-new-packages-in-a-throwaway-container.md)
+- [0008 — Block withdrawn versions from publication](adr/0008-block-withdrawn-versions-from-publication.md)
 
 ### Design
 

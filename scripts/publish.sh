@@ -14,6 +14,12 @@
 # the next run, also when the request does not target that codename: aptly
 # cannot add a component by switching (publish_snapshot).
 #
+# Withdrawn versions (ADR-0008): a row in a file of withdrawals/ (the batch
+# files withdraw.sh reads) blocks that version in every codename. The run
+# refuses the whole release, also under --dry-run, and lists each blocked
+# package, before it reads or changes any state. A malformed row refuses the
+# run too. The PR that removes the row is the only way back.
+#
 # Prints "CODENAME SNAPSHOT" for each published codename on stdout, the
 # snapshot being the producer's component, or the added component for a
 # codename the request does not target (several, space-separated, when a run
@@ -92,6 +98,10 @@ shopt -s nullglob
 debs=("$debs_dir"/*.deb)
 ((${#debs[@]})) || die "no .deb files in $debs_dir"
 
+# The rows of withdrawals/ in this checkout (ADR-0008), loaded once.
+load_withdrawals
+blocked=()
+
 # Route each package to its codenames: a ~debNN/+debNN version goes only to
 # the codename for Debian NN; an unmarked version goes to every target.
 declare -A files=() expect=() names=() releases=()
@@ -101,6 +111,11 @@ for deb in "${debs[@]}"; do
 	version=$(dpkg-deb -f "$deb" Version)
 	arch=$(dpkg-deb -f "$deb" Architecture)
 	matches_globs "$name" "$patterns" || die "$producer may not publish package $name ($deb)"
+	# One test for each .deb, not for each codename; every blocked one is
+	# collected, so the refusal names them all.
+	if withdrawn_by "$name" "$version" "$arch"; then
+		blocked+=("refuse $name $version $arch ($(basename "$deb")): withdrawn by $wd_hit")
+	fi
 
 	targets=$codenames
 	if [[ $version =~ [~+]deb([0-9]+) ]]; then
@@ -120,6 +135,12 @@ for deb in "${debs[@]}"; do
 		log "route $(basename "$deb") -> $codename/$component"
 	done
 done
+
+# Before the dry run and before any state: a dry run refuses too.
+if ((${#blocked[@]})); then
+	printf '%s\n' "${blocked[@]}" >&2
+	die "${#blocked[@]} package(s) of this release are withdrawn (ADR-0008); nothing was published. A PR that removes the row is the only way back."
+fi
 
 if ((dry_run)); then
 	if [[ -n $keep && $keep != - ]]; then

@@ -50,7 +50,8 @@ FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 	if (seen[$1]++) { print "producers.tsv line " FNR ": duplicate producer " $1; bad = 1 }
 } END { exit bad }' codenames="$APT_CODENAMES_FILE" "$APT_CODENAMES_FILE" "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
 
-# withdrawals/: the batch files withdraw.sh reads, one "NAME VERSION [ARCH]"
+# withdrawals/: the batch files withdraw.sh and publish.sh read (publish.sh
+# blocks the named versions, ADR-0008), one "NAME VERSION [ARCH]"
 # request row per line. The rows keep the shapes of the aptly query
 # withdraw.sh builds (the same regular expressions), and no row repeats, so
 # that a batch is what it looks like before anyone runs it.

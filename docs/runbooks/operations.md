@@ -41,8 +41,9 @@ if needed.
 - It removes that version from the working repository of the component that
   holds it and publishes a new snapshot of that component; everything else
   stays published.
-- The file stays in the pool, and republishing the release brings the
-  version back.
+- The file stays in the pool. A single withdraw by workflow input does not
+  block a republication: publishing the release brings the version back.
+  Commit a batch row (see "Withdraw a batch") for a permanent block.
 - The audit reports a withdrawn latest release as missing. That is expected,
   and the audit never republishes.
 
@@ -87,6 +88,10 @@ the file name as `batch`.
 - Set `dry_run` to print the plan from the published index alone; it needs
   no credentials and changes nothing. Use it first.
 - The files stay in the pool, as for one version.
+- Every committed row also blocks that version from publication in every
+  codename ([ADR-0008](../adr/0008-block-withdrawn-versions-from-publication.md)):
+  `publish.sh` refuses a release that holds it, before any state change. The
+  PR that removes the row is the only way back.
 
 ## Point-in-time rollback
 

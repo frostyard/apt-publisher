@@ -113,6 +113,11 @@ the new packages. When the column is `-`, it sends nothing.
   name that the codename already has in the other component MUST be refused.
 - A name/version/arch already published with different bytes MUST be
   refused.
+- A `.deb` that a row of a file in `withdrawals/` names (same name, an equal
+  version by dpkg, and the row's architecture or any) MUST be refused, in
+  every codename, before any state change, also in a dry run
+  ([ADR-0008](../adr/0008-block-withdrawn-versions-from-publication.md)). The
+  whole release is refused. A malformed row refuses the run.
 - With `keep=N`, the publication that adds newer versions MUST withdraw the
   older ones in the same run, and a publication whose own packages would be
   withdrawn at once MUST be refused before any state change.

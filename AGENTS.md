@@ -9,7 +9,9 @@ flow and [ADR-0001](docs/adr/0001-aptly-single-writer.md) the decision;
 components per codename, the move, the published key and the Debian-name
 audit (core ADR-0059), and
 [ADR-0004](docs/adr/0004-pin-the-signer-workflow-of-attested-producers.md)
-the signing workflow and ref that an attested producer names.
+the signing workflow and ref that an attested producer names;
+[ADR-0008](docs/adr/0008-block-withdrawn-versions-from-publication.md) the
+block on withdrawn versions.
 
 ## Invariants
 
@@ -60,6 +62,13 @@ the signing workflow and ref that an attested producer names.
   `<codename>-<time>-<label>`, marker `txn/pending-<codename>`, and the same
   aptly commands. Only `image` adds `-image` to them. Do not change the
   `main` path for a main-only codename.
+- A row in a file of `withdrawals/` blocks that version from publication in
+  every codename (ADR-0008). `publish.sh` refuses the whole release before
+  `--dry-run` exits and before any state change, and lists each blocked
+  package. The rows are those of the commit the run checks out. A malformed
+  row, or an entry that is not a readable regular file, refuses the run. The PR
+  that removes the row is the only way back. A single withdraw by workflow
+  input does not block.
 - Check snapshot existence with `snapshot_exists`, not `aptly snapshot show`,
   which fails once a snapshot's source repository has been rebuilt.
 - The canary installs the new `amd64` and `all` packages in a throwaway
