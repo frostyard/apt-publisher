@@ -35,7 +35,8 @@ producer tag -> goreleaser -> GitHub release (.deb + build provenance)
                   up to 100 queued runs)
      fetch-release.sh   download the release's .deb assets, gh attestation verify
                         with the producer's signing workflow and ref (ADR-0004)
-     publish.sh         validate -> reconcile state with the bucket -> aptly add
+     publish.sh         validate (withdrawn versions too) -> reconcile state with
+                        the bucket -> aptly add
                         -> snapshot -> record pending + save -> publish switch
                         -> clear pending + save -> read back from the bucket
      purge-cache.sh     purge InRelease/Release/Packages from the Cloudflare cache
@@ -373,8 +374,10 @@ A host that needs the image component replaces `Components: main` with
 - **Point-in-time rollback** also unpublishes other producers' later
   packages until they are republished. Use withdraw for a single bad
   version.
-- **Withdrawn versions come back** if the same release is republished. There
-  is no blocklist.
+- **Two paths still bring a withdrawn version back.** A re-run of an old
+  publish run reads the `withdrawals/` rows of its own, older commit. A
+  rollback to a snapshot that lists the version restores it, as `switch.sh`
+  does not judge rows.
 - **`switch.sh --force`** overwrites the bucket with aptly's view and
   re-uploads differing pool files. Run it only after inspecting the refusal.
 

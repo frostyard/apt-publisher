@@ -50,12 +50,16 @@ FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 	if (seen[$1]++) { print "producers.tsv line " FNR ": duplicate producer " $1; bad = 1 }
 } END { exit bad }' codenames="$APT_CODENAMES_FILE" "$APT_CODENAMES_FILE" "$APT_PRODUCERS_FILE" >&2 || fail "producers.tsv"
 
-# withdrawals/: the batch files withdraw.sh reads, one "NAME VERSION [ARCH]"
+# withdrawals/: the batch files withdraw.sh and publish.sh read (publish.sh
+# blocks the named versions, ADR-0008), one "NAME VERSION [ARCH]"
 # request row per line. The rows keep the shapes of the aptly query
 # withdraw.sh builds (the same regular expressions), and no row repeats, so
-# that a batch is what it looks like before anyone runs it.
-for file in "$ROOT"/withdrawals/*; do
-	[[ -e $file ]] || continue
+# that a batch is what it looks like before anyone runs it. Hidden entries
+# count too (dotglob), as publish.sh reads them, and an entry that is not a
+# regular file fails, as it refuses a publish run.
+for file in "$ROOT"/withdrawals/* "$ROOT"/withdrawals/.[!.]* "$ROOT"/withdrawals/..?*; do
+	[[ -e $file || -L $file ]] || continue
+	[[ -f $file && -r $file ]] || fail "withdrawals/$(basename "$file") is not a readable regular file"
 	# awk prints one line per problem and exits 0, so that a real awk
 	# failure stays a failure of this check.
 	problem=$(awk '

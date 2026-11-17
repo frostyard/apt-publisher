@@ -2247,6 +2247,9 @@ check "the single dry run prints one plan line" test "$(grep -c '^withdraw ' "$t
 check "the single dry run names the row" grep -qx 'withdraw trixie main frostyard-updex 1.2 amd64' "$tmp/err"
 check "the single dry run prints nothing on stdout" test -z "$(cat "$tmp/out")"
 check "the single dry run left InRelease unchanged" test "$(inrelease trixie)" = "$before"
+# The batch rows above name versions that later sections publish: they end
+# with this section.
+unset APT_WITHDRAWALS_DIR
 
 # --- a name in two components (core ADR-0059) ----------------------------------
 #
@@ -2319,6 +2322,117 @@ check "the same name is put into the main working repository" \
 must_fail "a live withdrawal refuses a name that two components hold" "imgpkg in more than one component" \
 	run withdraw.sh --codename trixie --package imgpkg --version 1.0
 check "the refusal withdrew nothing" listed_in trixie image imgpkg 1.0 amd64
+
+# --- withdrawn versions stay withdrawn (ADR-0008) -------------------------------
+#
+# A row in a file of the withdrawals directory blocks that version in every
+# codename: publish.sh refuses the whole release, also in a dry run, before it
+# reads or changes any state. The PR that removes the row is the way back.
+scope wdblock
+export APT_WITHDRAWALS_DIR=$tmp/wdblock
+mkdir -p "$APT_WITHDRAWALS_DIR"
+wd_updex() { run publish.sh --producer frostyard/updex --debs "$@"; }
+wd_updex_dry() { env -u R2_ACCESS_KEY_ID -u R2_SECRET_ACCESS_KEY "$ROOT/scripts/publish.sh" --producer frostyard/updex --debs "$@" --dry-run; }
+
+mkdeb "$tmp/wd-10" frostyard-updex 1.0 amd64
+must_pass "publish a version so the codename exists" wd_updex "$tmp/wd-10"
+printf '# withdrawn, as a batch of a reviewed PR\n\nfrostyard-updex 2.0\n' >"$APT_WITHDRAWALS_DIR/a.txt"
+wd_before=$(inrelease trixie)
+wd_forky=$(inrelease forky)
+
+# a. A blocked version is refused, live and in a dry run, with the row's place.
+mkdeb "$tmp/wd-20" frostyard-updex 2.0 amd64
+mkdeb "$tmp/wd-20" frostyard-updex 2.0 arm64
+must_fail "a withdrawn version is refused, with the row's place" "withdrawals/a.txt line 3" wd_updex "$tmp/wd-20"
+check "the refusal names the ADR and the way back" grep -q 'ADR-0008.*A PR that removes the row is the only way back' "$tmp/err"
+check "the refusal says nothing was published" grep -q '2 package(s) of this release are withdrawn' "$tmp/err"
+check "each blocked package has its own refuse line" test "$(grep -c '^refuse frostyard-updex 2.0 ' "$tmp/err")" = 2
+check "the refuse line names the package, version, architecture and file" \
+	grep -q '^refuse frostyard-updex 2.0 arm64 (frostyard-updex_2.0_arm64.deb): withdrawn by withdrawals/a.txt line 3$' "$tmp/err"
+check "the refusal left trixie InRelease unchanged" test "$(inrelease trixie)" = "$wd_before"
+check "the refusal left forky InRelease unchanged" test "$(inrelease forky)" = "$wd_forky"
+check "the withdrawn version is not listed" not_listed trixie frostyard-updex 2.0
+must_fail "a dry run refuses a withdrawn version too" "withdrawals/a.txt line 3" wd_updex_dry "$tmp/wd-20"
+
+# b. One blocked .deb refuses the whole release; only the blocked one is named.
+mkdeb "$tmp/wd-mix" frostyard-updex 2.0 amd64
+mkdeb "$tmp/wd-mix" frostyard-updex 2.1 amd64
+must_fail "a release with one withdrawn .deb is refused as a whole" "withdrawals/a.txt line 3" wd_updex "$tmp/wd-mix"
+check "one refuse line, for the blocked package only" test "$(grep -c '^refuse ' "$tmp/err")" = 1
+check "the unblocked package is not named as refused" lacks '^refuse frostyard-updex 2.1' "$tmp/err"
+check "the unblocked package of the refused release is not listed" not_listed trixie frostyard-updex 2.1
+check "the blocked package of the refused release is not listed" not_listed trixie frostyard-updex 2.0
+check "the refused release left InRelease unchanged" test "$(inrelease trixie)" = "$wd_before"
+
+# d. A row with an architecture blocks that architecture only.
+printf 'frostyard-updex 3.0 arm64\nfrostyard-updex 3.1 amd64\n' >"$APT_WITHDRAWALS_DIR/b.txt"
+mkdeb "$tmp/wd-30-both" frostyard-updex 3.0 amd64
+mkdeb "$tmp/wd-30-both" frostyard-updex 3.0 arm64
+must_fail "a row with an architecture refuses that architecture" "withdrawals/b.txt line 1" wd_updex "$tmp/wd-30-both"
+check "only the arm64 package is named" test "$(grep -c '^refuse ' "$tmp/err")" = 1
+check "the amd64 package of the refused release is not listed" not_listed trixie frostyard-updex 3.0
+
+# e. Versions are equal by dpkg: an epoch of 0 changes nothing, in either direction.
+printf 'frostyard-updex 0:4.0\nfrostyard-updex 4.1\n' >"$APT_WITHDRAWALS_DIR/c.txt"
+mkdeb "$tmp/wd-40" frostyard-updex 4.0 amd64
+must_fail "a row 0:4.0 blocks version 4.0" "withdrawals/c.txt line 1" wd_updex "$tmp/wd-40"
+mkdeb "$tmp/wd-41" frostyard-updex 0:4.1 amd64
+must_fail "a row 4.1 blocks version 0:4.1" "withdrawals/c.txt line 2" wd_updex "$tmp/wd-41"
+check "neither epoch spelling is listed" not_listed trixie frostyard-updex 4.0
+
+# c. What no row names publishes, in one release (each publish run costs CI
+# time): another version of the blocked package (2.1), the architecture that
+# the row of 3.0 does not name (amd64), an Architecture: all package that a
+# row for amd64 names (3.1), and a version with a blocked prefix (4.0.1).
+mkdeb "$tmp/wd-free" frostyard-updex 2.1 amd64
+mkdeb "$tmp/wd-free" frostyard-updex 3.0 amd64
+mkdeb "$tmp/wd-free" frostyard-updex 3.1 all
+mkdeb "$tmp/wd-free" frostyard-updex 4.0.1 amd64
+must_pass "the versions, architectures and spellings that no row names publish" wd_updex "$tmp/wd-free"
+check "another version of the blocked package is listed" listed trixie frostyard-updex 2.1 amd64
+check "the withdrawn version is still not listed" not_listed trixie frostyard-updex 2.0
+check "3.0 is listed for amd64" listed trixie frostyard-updex 3.0 amd64
+check "3.0 is not listed for arm64" not_listed trixie frostyard-updex 3.0 arm64
+check "a row for amd64 does not block 3.1 for all" listed trixie frostyard-updex 3.1 all
+check "4.0.1 is listed" listed trixie frostyard-updex 4.0.1 amd64
+
+# f. A malformed row refuses every publish run, with its place.
+wd_before=$(inrelease trixie)
+printf '# fine\nfrostyard-updex 5.0 amd64 extra\n' >"$APT_WITHDRAWALS_DIR/z-bad.txt"
+mkdeb "$tmp/wd-50" frostyard-updex 5.0 amd64
+must_fail "a row with four fields refuses the run, with its place" "withdrawals/z-bad.txt line 2" wd_updex "$tmp/wd-50"
+must_fail "a dry run refuses a malformed row too" "withdrawals/z-bad.txt line 2" wd_updex_dry "$tmp/wd-50"
+printf 'Bad-Name 5.0\n' >"$APT_WITHDRAWALS_DIR/z-bad.txt"
+must_fail "a row with an invalid name refuses the run" "withdrawals/z-bad.txt line 1: invalid package name" wd_updex "$tmp/wd-50"
+rm "$APT_WITHDRAWALS_DIR/z-bad.txt"
+mkdir "$APT_WITHDRAWALS_DIR/sub"
+must_fail "an entry that is not a regular file refuses the run" "withdrawals/sub is not a readable regular file" wd_updex "$tmp/wd-50"
+rmdir "$APT_WITHDRAWALS_DIR/sub"
+# Hidden (dot-prefixed) entries count like every other entry. The dry run
+# refuses as the live run does, and changes nothing.
+mkdeb "$tmp/wd-60" frostyard-updex 6.0 amd64
+printf '# hidden\n\nfrostyard-updex 6.0\n' >"$APT_WITHDRAWALS_DIR/.hidden.txt"
+must_fail "a row in a hidden file blocks its version" "withdrawals/.hidden.txt line 3" wd_updex_dry "$tmp/wd-60"
+printf 'frostyard-updex 6.0 amd64 extra\n' >"$APT_WITHDRAWALS_DIR/.hidden.txt"
+must_fail "a malformed row in a hidden file refuses the run, with its place" "withdrawals/.hidden.txt line 1" wd_updex_dry "$tmp/wd-60"
+rm "$APT_WITHDRAWALS_DIR/.hidden.txt"
+mkdir "$APT_WITHDRAWALS_DIR/.sub"
+must_fail "a hidden entry that is not a regular file refuses the run" "withdrawals/.sub is not a readable regular file" wd_updex_dry "$tmp/wd-60"
+rmdir "$APT_WITHDRAWALS_DIR/.sub"
+check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$wd_before"
+
+# g. After the refusals, a normal publish works: nothing changed. An empty
+# hidden file (a .gitkeep) holds no row and does not refuse it.
+: >"$APT_WITHDRAWALS_DIR/.gitkeep"
+must_pass "a normal publish works after the refusals, with an empty hidden file" wd_updex "$tmp/wd-50"
+rm "$APT_WITHDRAWALS_DIR/.gitkeep"
+check "5.0 is listed" listed trixie frostyard-updex 5.0 amd64
+must_pass "the suite passes the deep check" run verify.sh trixie --deep
+
+# The PR that removes the row is the way back.
+rm "$APT_WITHDRAWALS_DIR/a.txt"
+must_pass "a version publishes again once its row is removed" wd_updex "$tmp/wd-20"
+check "the version is listed again" listed trixie frostyard-updex 2.0 arm64
 unset APT_WITHDRAWALS_DIR
 
 # A rollback adds the component too, and then needs one snapshot per component.
@@ -3181,6 +3295,20 @@ copy_workflow_config() {
 
 copy_workflow_config
 must_pass "workflow shell contract accepts the unchanged workflows" "$tmp/cfg/tests/check-config.sh"
+
+# check-config reads hidden entries of withdrawals/ as publish.sh does, and
+# refuses one that is not a regular file.
+printf 'frostyard-updex 6.0 amd64 extra\n' >"$tmp/cfg/withdrawals/.hidden.txt"
+must_fail "check-config refuses a malformed row in a hidden withdrawals file" \
+	"withdrawals/.hidden.txt line 1" "$tmp/cfg/tests/check-config.sh"
+rm "$tmp/cfg/withdrawals/.hidden.txt"
+mkdir "$tmp/cfg/withdrawals/.sub"
+must_fail "check-config refuses a hidden withdrawals entry that is not a regular file" \
+	"withdrawals/.sub is not a readable regular file" "$tmp/cfg/tests/check-config.sh"
+rmdir "$tmp/cfg/withdrawals/.sub"
+: >"$tmp/cfg/withdrawals/.gitkeep"
+must_pass "check-config accepts an empty hidden withdrawals file" "$tmp/cfg/tests/check-config.sh"
+rm "$tmp/cfg/withdrawals/.gitkeep"
 
 copy_workflow_config
 check "the publish defaults removal fixture exists" grep -q '^defaults:$' "$tmp/cfg/.github/workflows/publish.yml"
