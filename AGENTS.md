@@ -65,10 +65,10 @@ block on withdrawn versions.
 - A row in a file of `withdrawals/` blocks that version from publication in
   every codename (ADR-0008). `publish.sh` refuses the whole release before
   `--dry-run` exits and before any state change, and lists each blocked
-  package. The rows are those of the commit the run checks out. A malformed
-  row, or an entry that is not a readable regular file, refuses the run. The PR
-  that removes the row is the only way back. A single withdraw by workflow
-  input does not block.
+  package. The rows are those of the commit the run checks out. Hidden
+  files count. A malformed row, or an entry that is not a readable regular
+  file, refuses the run. The PR that removes the row is the only way back. A
+  single withdraw by workflow input does not block.
 - Check snapshot existence with `snapshot_exists`, not `aptly snapshot show`,
   which fails once a snapshot's source repository has been rebuilt.
 - The canary installs the new `amd64` and `all` packages in a throwaway

@@ -70,8 +70,9 @@ producer_field() { table_field "$APT_PRODUCERS_FILE" "$1" "$2"; }
 # and the place of the row ("withdrawals/FILE line N").
 wd_names=() wd_versions=() wd_arches=() wd_refs=()
 
-# load_withdrawals reads every file of the withdrawals directory, in sorted
-# order, into the wd_* arrays. A missing directory holds no row. It fails
+# load_withdrawals reads every file of the withdrawals directory, hidden
+# (dot-prefixed) files too, in sorted order, into the wd_* arrays. A missing
+# directory holds no row. An empty file (such as .gitkeep) holds no row. It fails
 # closed: an entry that is not a readable regular file, or a row that
 # withdraw.sh would refuse, stops the run, since a row that is skipped lets a
 # withdrawn version come back.
@@ -80,11 +81,15 @@ load_withdrawals() {
 	local dir=$APT_WITHDRAWALS_DIR file base line lineno fields
 	[[ -e $dir ]] || return 0
 	[[ -d $dir ]] || die "$dir is not a directory"
-	local had_nullglob=0
+	# dotglob makes the glob see hidden entries; bash never matches . or ..
+	# with it. Both options return to the caller's state.
+	local had_nullglob=0 had_dotglob=0
 	shopt -q nullglob && had_nullglob=1
-	shopt -s nullglob
+	shopt -q dotglob && had_dotglob=1
+	shopt -s nullglob dotglob
 	local files=("$dir"/*)
 	((had_nullglob)) || shopt -u nullglob
+	((had_dotglob)) || shopt -u dotglob
 	for file in "${files[@]}"; do
 		base=${file##*/}
 		[[ -f $file && -r $file ]] || die "withdrawals/$base is not a readable regular file"

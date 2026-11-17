@@ -54,9 +54,12 @@ FILENAME == codenames { if (!/^#/ && NF) comps[$1] = $4; next }
 # blocks the named versions, ADR-0008), one "NAME VERSION [ARCH]"
 # request row per line. The rows keep the shapes of the aptly query
 # withdraw.sh builds (the same regular expressions), and no row repeats, so
-# that a batch is what it looks like before anyone runs it.
-for file in "$ROOT"/withdrawals/*; do
-	[[ -e $file ]] || continue
+# that a batch is what it looks like before anyone runs it. Hidden entries
+# count too (dotglob), as publish.sh reads them, and an entry that is not a
+# regular file fails, as it refuses a publish run.
+for file in "$ROOT"/withdrawals/* "$ROOT"/withdrawals/.[!.]* "$ROOT"/withdrawals/..?*; do
+	[[ -e $file || -L $file ]] || continue
+	[[ -f $file && -r $file ]] || fail "withdrawals/$(basename "$file") is not a readable regular file"
 	# awk prints one line per problem and exits 0, so that a real awk
 	# failure stays a failure of this check.
 	problem=$(awk '

@@ -2408,10 +2408,24 @@ rm "$APT_WITHDRAWALS_DIR/z-bad.txt"
 mkdir "$APT_WITHDRAWALS_DIR/sub"
 must_fail "an entry that is not a regular file refuses the run" "withdrawals/sub is not a readable regular file" wd_updex "$tmp/wd-50"
 rmdir "$APT_WITHDRAWALS_DIR/sub"
+# Hidden (dot-prefixed) entries count like every other entry. The dry run
+# refuses as the live run does, and changes nothing.
+mkdeb "$tmp/wd-60" frostyard-updex 6.0 amd64
+printf '# hidden\n\nfrostyard-updex 6.0\n' >"$APT_WITHDRAWALS_DIR/.hidden.txt"
+must_fail "a row in a hidden file blocks its version" "withdrawals/.hidden.txt line 3" wd_updex_dry "$tmp/wd-60"
+printf 'frostyard-updex 6.0 amd64 extra\n' >"$APT_WITHDRAWALS_DIR/.hidden.txt"
+must_fail "a malformed row in a hidden file refuses the run, with its place" "withdrawals/.hidden.txt line 1" wd_updex_dry "$tmp/wd-60"
+rm "$APT_WITHDRAWALS_DIR/.hidden.txt"
+mkdir "$APT_WITHDRAWALS_DIR/.sub"
+must_fail "a hidden entry that is not a regular file refuses the run" "withdrawals/.sub is not a readable regular file" wd_updex_dry "$tmp/wd-60"
+rmdir "$APT_WITHDRAWALS_DIR/.sub"
 check "the refusals left InRelease unchanged" test "$(inrelease trixie)" = "$wd_before"
 
-# g. After the refusals, a normal publish works: nothing changed.
-must_pass "a normal publish works after the refusals" wd_updex "$tmp/wd-50"
+# g. After the refusals, a normal publish works: nothing changed. An empty
+# hidden file (a .gitkeep) holds no row and does not refuse it.
+: >"$APT_WITHDRAWALS_DIR/.gitkeep"
+must_pass "a normal publish works after the refusals, with an empty hidden file" wd_updex "$tmp/wd-50"
+rm "$APT_WITHDRAWALS_DIR/.gitkeep"
 check "5.0 is listed" listed trixie frostyard-updex 5.0 amd64
 must_pass "the suite passes the deep check" run verify.sh trixie --deep
 
@@ -3281,6 +3295,20 @@ copy_workflow_config() {
 
 copy_workflow_config
 must_pass "workflow shell contract accepts the unchanged workflows" "$tmp/cfg/tests/check-config.sh"
+
+# check-config reads hidden entries of withdrawals/ as publish.sh does, and
+# refuses one that is not a regular file.
+printf 'frostyard-updex 6.0 amd64 extra\n' >"$tmp/cfg/withdrawals/.hidden.txt"
+must_fail "check-config refuses a malformed row in a hidden withdrawals file" \
+	"withdrawals/.hidden.txt line 1" "$tmp/cfg/tests/check-config.sh"
+rm "$tmp/cfg/withdrawals/.hidden.txt"
+mkdir "$tmp/cfg/withdrawals/.sub"
+must_fail "check-config refuses a hidden withdrawals entry that is not a regular file" \
+	"withdrawals/.sub is not a readable regular file" "$tmp/cfg/tests/check-config.sh"
+rmdir "$tmp/cfg/withdrawals/.sub"
+: >"$tmp/cfg/withdrawals/.gitkeep"
+must_pass "check-config accepts an empty hidden withdrawals file" "$tmp/cfg/tests/check-config.sh"
+rm "$tmp/cfg/withdrawals/.gitkeep"
 
 copy_workflow_config
 check "the publish defaults removal fixture exists" grep -q '^defaults:$' "$tmp/cfg/.github/workflows/publish.yml"

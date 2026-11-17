@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-16",
+  "scope": "scripts",
+  "correction": "A glob over withdrawals/ must include dot-prefixed entries (dotglob), in publish.sh's load_withdrawals and in tests/check-config.sh, or a hidden batch file escapes the block and a hidden malformed entry escapes the fail-closed refusal",
+  "evidence": "frostyard/apt-publisher#56, cross-review of head dd6a897 (openai/gpt-6.1-sol)",
+  "promoted_to": "tests/run.sh"
+}

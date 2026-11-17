@@ -19,8 +19,8 @@ name, the version and the architecture.
 
 ## Decision
 
-`scripts/publish.sh` reads every file in `withdrawals/` (`APT_WITHDRAWALS_DIR`)
-and refuses a `.deb` that a row names.
+`scripts/publish.sh` reads every file in `withdrawals/` (`APT_WITHDRAWALS_DIR`),
+hidden files too, and refuses a `.deb` that a row names.
 
 - **Rows apply to every codename.** A batch file names no codename, so a row
   blocks the version in `trixie`, `forky` and any later codename.
@@ -33,7 +33,8 @@ and refuses a `.deb` that a row names.
   the files of its own checkout.
 - **A malformed row refuses the run.** The row must have 2 or 3 fields and
   match the shapes `withdraw.sh` applies. A directory entry that is not a
-  readable regular file refuses the run too. The message names
+  readable regular file refuses the run too, a hidden entry included. An empty
+  file holds no row. The message names
   `withdrawals/FILE line N`. A row that is skipped would let a withdrawn
   version come back.
 - **The refusal comes before any state change.** The check runs after the
