@@ -6,9 +6,10 @@
 #      apt-get download, so apt itself checks the signature, the indexes and
 #      the package hashes.
 #   2. The install check, only after every download passed: install-canary.sh
-#      installs the amd64 and arch:all packages with apt-get install in a
-#      throwaway debian:CODENAME container. Other architectures get the
-#      download check only (the runner is amd64). See install-canary.sh for
+#      groups co-installable amd64 and arch:all packages with apt simulation,
+#      then installs each batch in a fresh debian:CODENAME container. Other
+#      architectures get the download check only (the runner is amd64). See
+#      install-canary.sh for
 #      its tunables and its own budget.
 # A failure in either step fails this script.
 #

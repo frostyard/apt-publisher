@@ -41,8 +41,12 @@ install fails `apt-canary.sh`, so the publish run stops before
 `scripts/notify.sh`.
 
 - **Scope.** Each `amd64` and `all` row is installed. For each codename and
-  component, one container installs all of that target's rows in one
-  `apt-get install --no-install-recommends NAME=VERSION...`. Rows of another
+  component, apt's solver simulates the exact reported package specs and
+  forms first-fit batches that can install together. Each batch runs in a
+  fresh container with one
+  `apt-get install --no-install-recommends NAME=VERSION...`. The solver applies
+  Debian package relationships, including `Conflicts`, `Breaks` and
+  `Replaces`, rather than a package-name exception list. Rows of another
   architecture (`arm64`) get the download check only, and the canary logs
   that it did not install them.
 - **Environment.** The container is `debian:<codename>` from Docker Hub,
@@ -63,8 +67,9 @@ install fails `apt-canary.sh`, so the publish run stops before
   values only from the client's own `config.json`, which the runner does not
   set.
 - **Time.** The install check has its own hard limit,
-  `APT_CANARY_INSTALL_BUDGET` (420 s), for the image pulls and the container
-  runs together, apart from the download budget. A container that outlasts
+  `APT_CANARY_INSTALL_BUDGET` (420 s), for the image pulls, planning container
+  and install containers together, apart from the download budget. A
+  container that outlasts
   it is removed by name, under its own limit (`APT_CANARY_CLEANUP`, 30 s,
   plus a 5 s kill grace), and the canary fails with its log and the result
   of the removal. A failed image pull is
@@ -101,23 +106,28 @@ The download check of ADR-0005 and its retry policy stay as they are.
   stays live, and `scripts/notify.sh` does not run, as after a failed
   download check.
 - The canary takes more time: about 10 to 50 s for each codename and
-  component on 2026-11-13, at most 420 s. The download check's worst case
+  component on 2026-11-13, plus a simulation container and any separate
+  install containers that incompatible packages need, at most 420 s. The
+  download check's worst case
   (600 s budget, 120 s warm-up, 10 s kill grace) and the install check's
   (420 s budget, which also counts the runtime's `--version` check, 10 s
   kill grace, 30 s cleanup, 5 s kill grace) come to 1195 s; they leave the
   other steps about 10 minutes of the 30-minute job.
 - A package whose `postinst` fails without systemd, as `kapsule` does today,
   cannot pass a publish run until its producer fixes it.
-- A recheck of a move installs every newest `image` package of a codename in
-  one container, which is slower than a publication.
+- A recheck of a move simulates and installs every newest `image` package of
+  a codename. Compatible rows share a container; incompatible rows do not.
+  This is slower than a publication.
 
 ## Alternatives considered
 
 - **Install each package in its own container.** It names the failing
-  package, but it multiplies the pulls and `apt-get update` runs. One
-  container per target installs the release as a host would.
-- **Simulate only (`apt-get -s install`).** It needs no container, but it
-  does not run maintainer scripts.
+  package, but it multiplies the `apt-get update` and install runs even when
+  the packages are co-installable. Solver-planned batches keep the shared
+  case bounded and isolate only rows that apt cannot install together.
+- **Simulate only (`apt-get -s install`).** Simulation is sufficient to plan
+  batches, but it does not run maintainer scripts. The canary now simulates
+  the plan, then performs the real install in each planned batch.
 - **Boot systemd in the container.** It would check service starts, but it
   needs a privileged container and makes the check slower and less stable.
 - **Install arm64 packages under QEMU.** It needs a workflow step for

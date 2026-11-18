@@ -1,0 +1,7 @@
+{
+  "date": "2026-11-18",
+  "scope": "scripts/install-canary.sh and tests/run.sh",
+  "correction": "An install-canary report can contain mutually incompatible amd64 or all packages: simulate exact package relationships with apt and split only incompatible rows into separate fresh containers; a single-container report assumption does not test every package that a release declares",
+  "evidence": "apt-publisher run 44328223523; ChairLift v0.17.2 packages frostyard-chairlift and frostyard-chairlift-system-integration declared Conflicts and failed one combined apt-get install transaction",
+  "promoted_to": "scripts/install-canary.sh; tests/run.sh"
+}

@@ -44,6 +44,11 @@ export APT_PUBLISH_RETRY_DELAYS='0 0'
 # the docker flavor (the default) refuses that flag. FAKE_PULL_STATUS fails a
 # pull, FAKE_RUN_SLEEP delays a run, FAKE_RUN_STATUS fails it with a dpkg
 # error, and FAKE_RM_HANG=SECONDS makes rm ignore SIGTERM and sleep that long.
+# A planner runs the real batching function with an inert guest_setup and apt
+# that succeeds by default. FAKE_PLAN_DEBS uses host apt simulation against
+# metadata from those .deb files, with isolated apt state and no host sources.
+# FAKE_PLAN_STATUS and FAKE_PLAN_SLEEP exercise planner errors and its budget;
+# FAKE_PLAN_OUTPUT supplies an invalid plan to check the host's validation.
 mkdir -p "$tmp/fake-runtime"
 cat >"$tmp/fake-runtime/runtime" <<'EOF'
 #!/usr/bin/env bash
@@ -115,13 +120,58 @@ run)
 	fi
 	image=$1
 	shift
-	if [[ $1 != bash || $2 != -c || $4 != install-canary ]]; then
+	if [[ $1 != bash || $2 != -c || ( $4 != install-canary && $4 != install-canary-plan ) ]]; then
 		rec "BAD ARG command $1 $2"
 	else
 		bash -n -c "$3" 2>/dev/null || rec "BAD SCRIPT"
+		guest_script=$3
+		guest_command=$4
 		shift 4
 	fi
 	base64 -d <<<"$keyring" | cmp -s - "$APT_KEYRING" || rec "BAD KEYRING"
+	if [[ ${guest_command:-} == install-canary-plan ]]; then
+		rec "plan $image $suite $components $*"
+		[[ -z ${FAKE_PLAN_SLEEP:-} ]] || sleep "$FAKE_PLAN_SLEEP"
+		if ((${FAKE_PLAN_STATUS:-0} != 0)); then
+			echo 'fake planner failed' >&2
+			exit "$FAKE_PLAN_STATUS"
+		fi
+		if [[ ${FAKE_PLAN_OUTPUT+x} ]]; then
+			printf '%s\n' "$FAKE_PLAN_OUTPUT"
+			exit 0
+		fi
+		planner_dir=$(mktemp -d)
+		trap 'rm -rf -- "$planner_dir"' EXIT
+		# Remove only the final entry-point call. Keep the actual planner
+		# function so the regression also checks its batching algorithm.
+		printf '%s\n' "${guest_script%$'\n'*}" >"$planner_dir/guest.sh"
+		cat >>"$planner_dir/guest.sh" <<'PLANNER'
+guest_setup() { :; }
+apt-get() {
+	[[ -n ${FAKE_PLAN_DEBS:-} ]] || return 0
+	command apt-get -o "Dir::Etc=$FAKE_APT_ROOT/etc" \
+		-o Dir::Etc::sourcelist=sources.list -o Dir::Etc::sourceparts=- \
+		-o "Dir::State=$FAKE_APT_ROOT/state" -o "Dir::State::status=$FAKE_APT_ROOT/status" \
+		-o "Dir::Cache=$FAKE_APT_ROOT/cache" -o Debug::NoLocking=1 \
+		-o APT::Architecture=amd64 -o APT::Architectures::=amd64 \
+		-o "APT::Sandbox::User=$(id -un)" "$@"
+}
+if [[ -n ${FAKE_PLAN_DEBS:-} ]]; then
+	mkdir -p "$FAKE_APT_ROOT"/{etc,repo,state/lists/partial,cache/archives/partial}
+	: >"$FAKE_APT_ROOT/status"
+	for deb in "$FAKE_PLAN_DEBS"/*.deb; do
+		dpkg-deb -f "$deb"
+		printf 'Filename: %s\nSize: %s\nSHA256: %s\n\n' "$deb" \
+			"$(stat -c %s "$deb")" "$(sha256sum <"$deb" | cut -d' ' -f1)"
+	done >"$FAKE_APT_ROOT/repo/Packages"
+	printf 'deb [trusted=yes] file:%s/repo ./\n' "$FAKE_APT_ROOT" >"$FAKE_APT_ROOT/etc/sources.list"
+	apt-get -q update || exit 1
+fi
+planner_guest "$@"
+PLANNER
+		FAKE_APT_ROOT=$planner_dir TMPDIR=$planner_dir bash "$planner_dir/guest.sh" "$@"
+		exit $?
+	fi
 	rec "run $image $suite $components $*"
 	[[ -z ${FAKE_RUN_SLEEP:-} ]] || sleep "$FAKE_RUN_SLEEP"
 	if ((${FAKE_RUN_STATUS:-0} != 0)); then
@@ -1115,7 +1165,8 @@ apt_class "a 404 on port 503 is not retried" 1 "$hdr" '  404  Not Found [IP: 192
 # --- install canary ---------------------------------------------------------------
 #
 # install-canary.sh against the fake runtime: the pull retries, the budget, the
-# refusals. The fake runtime never reads the public URL.
+# refusals. The fake runtime never reads the public URL; planner fixtures
+# instead use isolated apt state and metadata from locally built packages.
 install_canary() { "$ROOT/scripts/install-canary.sh" "$@"; }
 : >"$FAKE_RUNTIME_LOG"
 must_pass "the install canary installs 1 target" install_canary trixie trixie-thing=1.1
@@ -1187,6 +1238,71 @@ check "arch:all rows give the exact runs" test "$(grep '^run ' "$FAKE_RUNTIME_LO
 	'run docker.io/library/debian:trixie trixie main docs-thing=1.0 frostyard-updex=2.0.2')"
 check "the arm64 row of the arch:all report is not installed" \
 	grep -qx 'install canary forky/arm64: not installed, the runner is amd64 (download check only)' "$tmp/err"
+
+# Build the report from real .deb control metadata. The planner's apt must
+# separate alpha and beta, but gamma must share alpha's batch, not get a
+# third install container. Replaces alone must not cause a split.
+MKDEB_CONTROL='Conflicts: batch-beta' mkdeb "$tmp/batch-debs" batch-alpha 1.0 amd64
+mkdeb "$tmp/batch-debs" batch-beta 1.0 all
+mkdeb "$tmp/batch-debs" batch-gamma 1.0 amd64
+for deb in "$tmp/batch-debs"/*.deb; do
+	printf 'trixie\t%s\t%s\t%s\tmain\n' "$(dpkg-deb -f "$deb" Package)" \
+		"$(dpkg-deb -f "$deb" Version)" "$(dpkg-deb -f "$deb" Architecture)"
+done >"$tmp/batch-report.tsv"
+: >"$FAKE_RUNTIME_LOG"
+must_pass "conflicting report rows install in separate containers" \
+	env FAKE_PLAN_DEBS="$tmp/batch-debs" "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "a conflict makes exactly 2 install containers and keeps the compatible row batched" \
+	test "$(grep '^run ' "$FAKE_RUNTIME_LOG")" = "$(printf '%s\n' \
+	'run docker.io/library/debian:trixie trixie main batch-alpha=1.0 batch-gamma=1.0' \
+	'run docker.io/library/debian:trixie trixie main batch-beta=1.0')"
+check "planning and both batches reuse 1 image pull" test "$(grep -c '^pull ' "$FAKE_RUNTIME_LOG")" = 1
+MKDEB_CONTROL='Replaces: batch-beta' mkdeb "$tmp/batch-debs" batch-alpha 1.0 amd64
+: >"$FAKE_RUNTIME_LOG"
+must_pass "Replaces alone permits a single batch" \
+	env FAKE_PLAN_DEBS="$tmp/batch-debs" "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "Replaces alone keeps all report rows in 1 install container" \
+	test "$(grep '^run ' "$FAKE_RUNTIME_LOG")" = \
+	'run docker.io/library/debian:trixie trixie main batch-alpha=1.0 batch-beta=1.0 batch-gamma=1.0'
+MKDEB_CONTROL='Breaks: batch-beta (<< 2.0)' mkdeb "$tmp/batch-debs" batch-alpha 1.0 amd64
+: >"$FAKE_RUNTIME_LOG"
+must_pass "versioned Breaks uses apt semantics to split the batch" \
+	env FAKE_PLAN_DEBS="$tmp/batch-debs" "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "a matching Breaks makes 2 install containers" test "$(runs)" = 2
+MKDEB_CONTROL='Breaks: batch-beta (>= 2.0)' mkdeb "$tmp/batch-debs" batch-alpha 1.0 amd64
+: >"$FAKE_RUNTIME_LOG"
+must_pass "a nonmatching Breaks keeps the batch together" \
+	env FAKE_PLAN_DEBS="$tmp/batch-debs" "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "a nonmatching Breaks makes 1 install container" test "$(runs)" = 1
+: >"$FAKE_RUNTIME_LOG"
+must_fail "a planner failure refuses the report before any install" "install canary planning of trixie/amd64 failed: fake planner failed" \
+	env FAKE_PLAN_STATUS=100 "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "a failed planner runs no install container" test "$(runs)" = 0
+: >"$FAKE_RUNTIME_LOG"
+printf 'trixie\tbatch-alpha\t9.0\tamd64\tmain\ntrixie\tbatch-beta\t1.0\tall\tmain\n' >"$tmp/bad-batch-report.tsv"
+must_fail "a spec that cannot install alone fails planning clearly" "error: cannot plan an install of batch-alpha=9.0" \
+	env FAKE_PLAN_DEBS="$tmp/batch-debs" "$ROOT/scripts/install-canary.sh" --report "$tmp/bad-batch-report.tsv"
+check "a failed simulation runs no install container" test "$(runs)" = 0
+must_fail "an empty planner batch is refused" "returned an empty batch" \
+	env FAKE_PLAN_OUTPUT=$'CANARY_BATCH\t' "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+must_fail "an incomplete plan is refused" "omitted package specs" \
+	env FAKE_PLAN_OUTPUT=$'CANARY_BATCH\tbatch-alpha=1.0' "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+must_fail "an unexpected planned spec is refused" "returned an unexpected spec: batch-unknown=1.0" \
+	env FAKE_PLAN_OUTPUT=$'CANARY_BATCH\tbatch-unknown=1.0' "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+must_fail "a duplicate planned spec is refused" "returned an unexpected spec: batch-alpha=1.0" \
+	env FAKE_PLAN_OUTPUT=$'CANARY_BATCH\tbatch-alpha=1.0 batch-alpha=1.0' "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "invalid plans never start an install container" test "$(runs)" = 0
+: >"$FAKE_RUNTIME_LOG"
+must_fail "the install budget also stops a hanging planner" "the install canary budget of 2s is spent; stopped the planning of trixie/amd64" \
+	env FAKE_PLAN_SLEEP=30 APT_CANARY_INSTALL_BUDGET=2 "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "the stopped planner container is removed by name" grep -Eq '^rm apt-canary-[0-9]+-[0-9]+$' "$FAKE_RUNTIME_LOG"
+check "a stopped planner runs no install container" test "$(runs)" = 0
+: >"$FAKE_RUNTIME_LOG"
+must_pass "a podman planner and its batches disable proxy forwarding" \
+	env FAKE_FLAVOR=podman "$ROOT/scripts/install-canary.sh" --report "$tmp/batch-report.tsv"
+check "podman disables proxy forwarding for the planner and the install" \
+	test "$(grep -c '^opt --http-proxy=false$' "$FAKE_RUNTIME_LOG")" = 2
+
 must_fail "an unknown runtime is refused" "APT_CANARY_RUNTIME /nonexistent is not an executable file" \
 	env APT_CANARY_RUNTIME=/nonexistent "$ROOT/scripts/install-canary.sh" trixie x=1
 must_fail "a runtime that is not on PATH is refused" "APT_CANARY_RUNTIME no-such-runtime is not on PATH" \
