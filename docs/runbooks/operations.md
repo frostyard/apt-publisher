@@ -133,8 +133,9 @@ inspect what changed first.
   `scripts/verify.sh trixie --deep frostyard-updex=2.0.2`. A spec can name a
   component, `image/NAME=VERSION`, and `!` asks for absence.
 - **Canary** through the public URL: apt checks the signature, the indexes
-  and the package hashes, then, for `amd64`, installs the packages in a
-  throwaway `debian:<codename>` container (ADR-0007; it needs `docker` or
+  and the package hashes, then, for `amd64` and `all`, groups co-installable
+  packages with apt simulation and installs each batch in a fresh throwaway
+  `debian:<codename>` container (ADR-0007; it needs `docker` or
   `podman`, or `APT_CANARY_RUNTIME`):
   `scripts/apt-canary.sh trixie amd64 frostyard-updex=2.0.2`; use
   `trixie/image` for the image component. The install check alone:

@@ -71,9 +71,11 @@ block on withdrawn versions.
   single withdraw by workflow input does not block.
 - Check snapshot existence with `snapshot_exists`, not `aptly snapshot show`,
   which fails once a snapshot's source repository has been rebuilt.
-- The canary installs the new `amd64` and `all` packages in a throwaway
-  container after the download check passes (`scripts/install-canary.sh`,
-  ADR-0007). The container gets only the `CANARY_*` environment values
+- The canary uses apt simulation to group the new `amd64` and `all` report
+  rows into co-installable batches after the download check passes, and
+  installs each batch in a fresh throwaway container
+  (`scripts/install-canary.sh`, ADR-0007). The container gets only the
+  `CANARY_*` environment values
   (keyring, URL, suite, components): no mount, no secret, no extra privilege,
   and with podman `--http-proxy=false` (podman forwards proxy variables by
   default).

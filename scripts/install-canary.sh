@@ -8,8 +8,9 @@
 #   install-canary.sh CODENAME[/COMPONENT] NAME=VERSION...   (component: main)
 #   install-canary.sh --report FILE  rows of "codename name version arch component"
 #
-# With --report, the amd64 and arch:all rows of one codename and component
-# install in 1 container with 1 apt-get install. The container sees main for
+# With --report, apt simulation groups the amd64 and arch:all rows of one
+# codename and component into co-installable batches, each in a fresh
+# container with 1 apt-get install. The container sees main for
 # main, and main and image for image (image packages can depend on main).
 # Rows of other architectures are not installed (the runner is amd64): they
 # get the download check only, and a log line says so.
@@ -131,16 +132,14 @@ pull() {
 	pulled[$image]=1
 }
 
-# guest NAME=VERSION... runs as root in the container. It installs the
-# packages from the Frostyard source in CANARY_* and checks that dpkg lists
-# each one as installed at its version.
-guest() {
+# guest_setup configures the same apt sources for planning and installation.
+guest_setup() {
 	set -euo pipefail
 	export DEBIAN_FRONTEND=noninteractive
 	# No service starts in the throwaway container.
 	printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
 	chmod 0755 /usr/sbin/policy-rc.d
-	local apt=(apt-get -q -y -o Acquire::Retries=3) spec name version got
+	local apt=(apt-get -q -y -o Acquire::Retries=3)
 	"${apt[@]}" update
 	"${apt[@]}" install --no-install-recommends ca-certificates
 	mkdir -p /etc/apt/keyrings
@@ -151,6 +150,13 @@ guest() {
 		"$CANARY_URL" "$CANARY_SUITE" "$CANARY_COMPONENTS" >/etc/apt/sources.list.d/frostyard.sources
 	# A bad signature or a missing index is an error, not a warning.
 	"${apt[@]}" update --error-on=any
+}
+
+# guest NAME=VERSION... installs and verifies every exact spec in a batch.
+guest() {
+	set -euo pipefail
+	guest_setup
+	local apt=(apt-get -q -y -o Acquire::Retries=3) spec name version got
 	"${apt[@]}" install --no-install-recommends "$@"
 	for spec; do
 		name=${spec%%=*}
@@ -166,8 +172,45 @@ guest() {
 	done
 }
 
-# install_check CODENAME[/COMPONENT] NAME=VERSION...
-install_check() {
+# planner_guest uses apt's solver, not package-name or relationship parsing.
+# Each spec must work alone. First-fit batching then keeps compatible rows
+# together, including packages whose Replaces field does not prevent this.
+planner_guest() {
+	set -euo pipefail
+	guest_setup
+	local spec i placed simulation
+	simulation=$(mktemp)
+	local -a batches=() candidate=()
+	for spec; do
+		if ! apt-get -q -s install --no-install-recommends "$spec" >"$simulation" 2>&1; then
+			cat "$simulation" >&2
+			echo "error: cannot plan an install of $spec" >&2
+			exit 1
+		fi
+		placed=0
+		for i in "${!batches[@]}"; do
+			read -r -a candidate <<<"${batches[i]}"
+			if apt-get -q -s install --no-install-recommends "${candidate[@]}" "$spec" >"$simulation" 2>&1; then
+				batches[i]+=" $spec"
+				placed=1
+				break
+			fi
+		done
+		((placed)) || batches+=("$spec")
+	done
+	printf 'CANARY_BATCH\t%s\n' "${batches[@]}"
+}
+
+# container_check MODE CODENAME[/COMPONENT] NAME=VERSION...
+# Planning shares the install budget, runtime restrictions and cleanup.
+container_check() {
+	local mode=$1 action=install entry=guest command=install-canary
+	shift
+	if [[ $mode == plan ]]; then
+		action=planning
+		entry=planner_guest
+		command=install-canary-plan
+	fi
 	local codename component=main target components image name rc=0 t0 spec
 	codename=${1%%/*}
 	[[ $1 != */* ]] || component=${1#*/}
@@ -189,10 +232,11 @@ install_check() {
 	t0=$SECONDS
 	pull "$image"
 	name=apt-canary-$$-$RANDOM
-	bounded "$work/run.log" "the install of $target/amd64" "$runtime" run --rm --pull=never "${run_opts[@]}" --name "$name" \
+	bounded "$work/run.log" "the $action of $target/amd64" "$runtime" run --rm --pull=never "${run_opts[@]}" --name "$name" \
 		-e "CANARY_KEYRING=$keyring" -e "CANARY_URL=$APT_PUBLIC_URL" -e "CANARY_SUITE=$codename" \
 		-e "CANARY_COMPONENTS=$components" "$image" \
-		bash -c "$(declare -f guest); guest \"\$@\"" install-canary "$@" || rc=$?
+		bash -c "$(declare -f guest_setup "$entry")
+$entry \"\$@\"" "$command" "$@" || rc=$?
 	if ((rc == 124)); then
 		local removed rm_rc=0
 		timeout -k 5 "$cleanup" "$runtime" rm -f "$name" </dev/null >"$work/rm.log" 2>&1 || rm_rc=$?
@@ -201,10 +245,43 @@ install_check() {
 		else
 			removed="could not remove container $name (status $rm_rc): $(tail -n 5 "$work/rm.log")"
 		fi
-		die "the install canary budget of ${budget}s is spent; stopped the install of $target/amd64; $removed: $(tail_log "$work/run.log")"
+		die "the install canary budget of ${budget}s is spent; stopped the $action of $target/amd64; $removed: $(tail_log "$work/run.log")"
 	fi
-	((rc == 0)) || die "install canary of $target/amd64 failed: $(tail_log "$work/run.log")"
-	log "install canary $target/amd64: $* ($((SECONDS - t0))s)"
+	if [[ $mode == plan ]]; then
+		((rc == 0)) || die "install canary planning of $target/amd64 failed: $(tail_log "$work/run.log")"
+		awk '/^CANARY_BATCH\t/ { sub(/^CANARY_BATCH\t/, ""); print }' "$work/run.log" >"$work/plan"
+	else
+		((rc == 0)) || die "install canary of $target/amd64 failed: $(tail_log "$work/run.log")"
+		log "install canary $target/amd64: $* ($((SECONDS - t0))s)"
+	fi
+}
+
+install_check() { container_check install "$@"; }
+
+# report_check validates the complete plan before starting any install.
+report_check() {
+	local target=$1 spec line
+	shift
+	if (($# == 1)); then
+		install_check "$target" "$@"
+		return
+	fi
+	container_check plan "$target" "$@"
+	local -A remaining=()
+	local -a batch=()
+	for spec; do remaining[$spec]=1; done
+	while IFS= read -r line; do
+		read -r -a batch <<<"$line"
+		((${#batch[@]} > 0)) || die "install canary planning of $target returned an empty batch"
+		for spec in "${batch[@]}"; do
+			[[ -n ${remaining[$spec]:-} ]] || die "install canary planning of $target returned an unexpected spec: $spec"
+			unset 'remaining[$spec]'
+		done
+	done <"$work/plan"
+	((${#remaining[@]} == 0)) || die "install canary planning of $target omitted package specs"
+	while read -r -a batch; do
+		install_check "$target" "${batch[@]}"
+	done <"$work/plan"
 }
 
 if [[ ${1:-} == --report ]]; then
@@ -219,7 +296,7 @@ if [[ ${1:-} == --report ]]; then
 	while read -r codename component; do
 		mapfile -t specs < <(awk -F'\t' -v c="$codename" -v k="$component" \
 			'$1 == c && ($5 == "" ? "main" : $5) == k && ($4 == "amd64" || $4 == "all") { print $2 "=" $3 }' "$2" | sort -u)
-		install_check "$codename/$component" "${specs[@]}"
+		report_check "$codename/$component" "${specs[@]}"
 		sets=$((sets + 1))
 	done < <(awk -F'\t' 'NF && ($4 == "amd64" || $4 == "all") { print $1, ($5 == "" ? "main" : $5) }' "$2" | sort -u)
 	((sets > 0)) || log "install canary: the report has no amd64 or all row; nothing to install"

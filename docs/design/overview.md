@@ -176,11 +176,13 @@ canary runs `apt-get update` and `apt-get download` for each new package
 through the public URL. apt checks the signature, the indexes and the package
 hashes through the CDN
 ([ADR-0005](../adr/0005-check-publications-with-an-apt-download-canary.md)).
-When every download passes, `scripts/install-canary.sh` installs the new
-`amd64` and `all` packages with `apt-get install --no-install-recommends`,
-one throwaway `debian:<codename>` container for each codename and component,
-with the public URL as the only Frostyard source (`main`, plus `image` for an
-`image` package). This checks dependency resolution and the maintainer
+When every download passes, `scripts/install-canary.sh` uses apt simulation
+to group the new `amd64` and `all` packages into co-installable batches for
+each codename and component. It then runs
+`apt-get install --no-install-recommends` in a fresh throwaway
+`debian:<codename>` container for each batch, with the public URL as the only
+Frostyard source (`main`, plus `image` for an `image` package). This checks
+Debian package relationships and the maintainer
 scripts, without systemd and with every service start denied. `arm64`
 packages get the download check only. The install check has its own time
 limit (`APT_CANARY_INSTALL_BUDGET`, 420 s), and the job's secrets never reach
