@@ -551,7 +551,7 @@ for glob in '.github/workflows/**' 'scripts/**' 'config/**' 'keys/**' 'withdrawa
 done
 
 # B6 caller: the caller workflow has 1 allowed shape (core
-# docs/specs/pr-triage.md section E). The file may start with comment lines and
+# docs/specs/pr-triage.md rule A). The file may start with comment lines and
 # blank lines; the rest must equal this repository's body line by line, after
 # its trailing spaces go (a trailing space does not change how GitHub reads a
 # line). Only the 40-character SHA in the `uses:` line and the comment after it
@@ -604,6 +604,8 @@ caller_body+=(
 	'    permissions:'
 	'      contents: read'
 	'      pull-requests: write'
+	'      checks: read'
+	'      statuses: read'
 	'    uses: frostyard/core/.github/workflows/pr-triage.yml@<sha>'
 )
 

@@ -487,7 +487,18 @@ mut_b6_caller_commented_permission() {
 	changed "$2" "$1" .github/workflows/risk-paths.yml
 }
 
-# The job holds exactly 2 permissions.
+# A private caller requires both reads for readiness (core ADR-0086).
+mut_b6_caller_no_checks_read() {
+	sed -i '/^      checks: read$/d' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+mut_b6_caller_no_statuses_read() {
+	sed -i '/^      statuses: read$/d' "$1/.github/workflows/risk-paths.yml"
+	changed "$2" "$1" .github/workflows/risk-paths.yml
+}
+
+# The job holds exactly 4 permissions.
 mut_b6_caller_extra_permission() {
 	sed -i '/^      contents: read$/a\      actions: read' "$1/.github/workflows/risk-paths.yml"
 	changed "$2" "$1" .github/workflows/risk-paths.yml
@@ -709,6 +720,8 @@ order=(
 	b6_caller_main
 	b6_caller_no_labeled
 	b6_caller_commented_permission
+	b6_caller_no_checks_read
+	b6_caller_no_statuses_read
 	b6_caller_extra_permission
 	b6_caller_merge_group
 	b6_caller_extra_line
@@ -797,6 +810,8 @@ declare -A expected=(
 	[b6_caller_short_sha]='uses is not pinned to a 40-character commit SHA'
 	[b6_caller_no_labeled]="expected '    types: [opened, synchronize, reopened, edited, labeled]'"
 	[b6_caller_commented_permission]="expected '      pull-requests: write', found '      # pull-requests: write'"
+	[b6_caller_no_checks_read]="expected '      checks: read', found '      statuses: read'"
+	[b6_caller_no_statuses_read]="expected '      statuses: read', found '    uses:"
 	[b6_caller_extra_permission]="expected '      pull-requests: write', found '      actions: read'"
 	[b6_caller_merge_group]="expected '<blank>', found '  merge_group:'"
 	[b6_caller_cr_in_pin_comment]='holds a CR (U+000D)'
