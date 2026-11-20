@@ -95,6 +95,9 @@ in `docs/`.
 
 ## Gates
 
+Run `make ci` before every push (core ADR-0083): it is the 1 local entry
+point to the CI gate, and CI's `ci` job runs it.
+
 `make verify` runs `make lint` and the end-to-end `tests/run.sh`. `make lint`
 runs shellcheck, actionlint, `tests/check-config.sh`, `tests/check-baseline.sh`
 and `tests/check-baseline-test.sh`, the baseline check's negative tests. Tools

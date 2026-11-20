@@ -45,7 +45,7 @@ No local plan yet. The order of the remaining work is core
 
 - [operations.md](runbooks/operations.md): one-time setup, publication, withdrawal, retention, rollback, move, recovery, the cache rules.
 - [producers.md](runbooks/producers.md): add, change or retire a producer.
-- [development.md](runbooks/development.md): the tools, `make verify`, and what the end-to-end test does.
+- [development.md](runbooks/development.md): the tools, `make ci` and `make verify`, and what the end-to-end test does.
 
 ## Conventions
 

@@ -5,6 +5,9 @@ Living document. Rationale: [ADR-0001](../adr/0001-aptly-single-writer.md),
 [ADR-0002](../adr/0002-two-components-per-codename.md),
 [ADR-0003](../adr/0003-keep-the-newest-versions-of-a-producer.md),
 [ADR-0004](../adr/0004-pin-the-signer-workflow-of-attested-producers.md),
+[ADR-0005](../adr/0005-check-publications-with-an-apt-download-canary.md),
+[ADR-0007](../adr/0007-install-new-packages-in-a-throwaway-container.md),
+[ADR-0008](../adr/0008-block-withdrawn-versions-from-publication.md),
 core [ADR-0055](https://github.com/frostyard/core/blob/main/docs/adr/0055-publish-debian-packages-through-the-apt-publisher.md),
 core [ADR-0056](https://github.com/frostyard/core/blob/main/docs/adr/0056-rebuild-images-after-apt-publication.md),
 core [ADR-0059](https://github.com/frostyard/core/blob/main/docs/adr/0059-publish-image-only-packages-in-a-separate-apt-component.md),
@@ -35,8 +38,8 @@ producer tag -> goreleaser -> GitHub release (.deb + build provenance)
                   up to 100 queued runs)
      fetch-release.sh   download the release's .deb assets, gh attestation verify
                         with the producer's signing workflow and ref (ADR-0004)
-     publish.sh         validate (withdrawn versions too) -> reconcile state with
-                        the bucket -> aptly add
+     publish.sh         validate (withdrawn versions too, ADR-0008) -> reconcile
+                        state with the bucket -> aptly add
                         -> snapshot -> record pending + save -> publish switch
                         -> clear pending + save -> read back from the bucket
      purge-cache.sh     purge InRelease/Release/Packages from the Cloudflare cache
@@ -379,7 +382,9 @@ A host that needs the image component replaces `Components: main` with
 - **Two paths still bring a withdrawn version back.** A re-run of an old
   publish run reads the `withdrawals/` rows of its own, older commit. A
   rollback to a snapshot that lists the version restores it, as `switch.sh`
-  does not judge rows.
+  does not judge rows. See
+  [ADR-0008](../adr/0008-block-withdrawn-versions-from-publication.md) for
+  the block and its gaps.
 - **`switch.sh --force`** overwrites the bucket with aptly's view and
   re-uploads differing pool files. Run it only after inspecting the refusal.
 
