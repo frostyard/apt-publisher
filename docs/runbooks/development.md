@@ -26,6 +26,8 @@ directory of mode 700, which a stricter umask gives the test fixtures.
 ## The gate
 
 `make verify` is the gate; `make check` and `make ci` both run it.
+Run it as `make ci` before a push (core
+[ADR-0083](https://github.com/frostyard/core/blob/main/docs/adr/0083-run-the-ci-gate-locally-as-make-ci.md)).
 
 - `make lint` runs `shellcheck scripts/*.sh tests/*.sh`, `actionlint`,
   `tests/check-config.sh`, `tests/check-baseline.sh` and
@@ -89,11 +91,14 @@ diff, `level:L3` skim, `level:L4` title and CI), and `risk:high` at L1 and L2
   or an `AGENTS.md` rule when no test can catch it, plus 1 record file in
   `.memory/corrections/` ([`.memory/README.md`](../../.memory/README.md)).
 
-## Checks to run before a pull request
+## Checks to run before a push
 
 ```sh
-mise exec -- make verify
+mise exec -- make ci
 ```
+
+`make ci` runs `make verify`, the same gate that CI's `ci` job runs
+(core ADR-0083).
 
 `README.md` follows core's
 [README spec](https://github.com/frostyard/core/blob/main/docs/specs/readme.md)
