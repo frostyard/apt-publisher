@@ -5,12 +5,16 @@
 # Containerfile. Each entry has 1 group with `patterns: ["*"]`, so each entry
 # opens at most 1 version-update PR for each run (ADR-0075). The group has no
 # `applies-to`, so security updates stay 1 PR each.
+#
+# Version updates run monthly, on the 1st at a time GitHub picks (ADR-0089): the
+# schedule holds only `interval`. An ecosystem with manifests in several
+# directories keeps 1 entry with a `directories:` list, so it opens 1 PR.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
