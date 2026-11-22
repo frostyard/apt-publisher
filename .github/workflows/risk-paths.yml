@@ -27,4 +27,4 @@ jobs:
       pull-requests: write
       checks: read
       statuses: read
-    uses: frostyard/core/.github/workflows/pr-triage.yml@57f3b9bd39e123be22c280aff0ba233f471a658a # frostyard/core (core ADR-0086)
+    uses: frostyard/core/.github/workflows/pr-triage.yml@f99acfddee0a5466990b72e6292a5b1642444a25 # frostyard/core main, 2026-11-22 (core#288)
