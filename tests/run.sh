@@ -497,6 +497,69 @@ retry_publish() {
 }
 retry_lines() { grep -c '^transient R2 error in aptly publish ' "$tmp/err" || true; }
 
+# --- aptly search -----------------------------------------------------------------
+#
+# repo_set and snapshot_names read a local aptly database and die on a search
+# error. aptly_init would restore the state bucket, so build a throwaway
+# database with a minimal config; each call runs in its own bash, where a die
+# ends that shell and not this harness.
+
+search_root=$tmp/share-search
+mkdir -p "$search_root"
+jq -n --arg root "$search_root" '{rootDir: $root}' >"$search_root/aptly.conf"
+search_aptly() { aptly -config="$search_root/aptly.conf" "$@" >/dev/null; }
+search_call() {
+	# shellcheck disable=SC2016 # the child shell expands its arguments.
+	env APTLY_ROOT="$search_root" bash -c \
+		'. "$1/scripts/lib.sh"; shift; "$@"' bash "$ROOT" "$@"
+}
+# search_runs CMD... keeps stdout, stderr and the exact status of one call.
+search_runs() {
+	local status=0
+	search_call "$@" >"$tmp/out" 2>"$tmp/err" || status=$?
+	printf '%s\n' "$status" >"$tmp/status"
+}
+search_aptly repo create -distribution=trixie -component=main share-search-populated
+search_aptly repo create -distribution=trixie -component=main share-search-empty
+mkdeb "$tmp/share-search-debs" share-search-zeta 1.0 amd64
+mkdeb "$tmp/share-search-debs" share-search-zeta 2.0 amd64
+mkdeb "$tmp/share-search-debs" share-search-alpha 8.0 all
+search_aptly repo add share-search-populated "$tmp/share-search-debs"
+search_aptly snapshot create share-search-populated-snapshot from repo share-search-populated
+search_aptly snapshot create share-search-empty-snapshot from repo share-search-empty
+
+printf '%s\n' \
+	'share-search-alpha 8.0 all' \
+	'share-search-zeta 1.0 amd64' \
+	'share-search-zeta 2.0 amd64' >"$tmp/share-search-repo.expected"
+must_pass "repo_set lists a populated repository" search_call repo_set share-search-populated
+check "repo_set prints the sorted packages byte for byte" cmp -s "$tmp/out" "$tmp/share-search-repo.expected"
+check "repo_set writes no stderr for a populated repository" test ! -s "$tmp/err"
+printf '%s\n' share-search-alpha share-search-zeta >"$tmp/share-search-names.expected"
+must_pass "snapshot_names deduplicates a populated snapshot" search_call snapshot_names share-search-populated-snapshot
+check "snapshot_names prints the sorted names byte for byte" cmp -s "$tmp/out" "$tmp/share-search-names.expected"
+check "snapshot_names writes no stderr for a populated snapshot" test ! -s "$tmp/err"
+
+must_pass "repo_set finds an empty repository" search_call repo_set share-search-empty
+check "repo_set prints nothing for an empty repository" test ! -s "$tmp/out"
+check "repo_set writes no stderr for an empty repository" test ! -s "$tmp/err"
+must_pass "snapshot_names finds an empty snapshot" search_call snapshot_names share-search-empty-snapshot
+check "snapshot_names prints nothing for an empty snapshot" test ! -s "$tmp/out"
+check "snapshot_names writes no stderr for an empty snapshot" test ! -s "$tmp/err"
+
+search_runs repo_set share-search-missing
+check "repo_set exits 1 for a missing repository" test "$(cat "$tmp/status")" = 1
+check "repo_set prints nothing for a missing repository" test ! -s "$tmp/out"
+printf '%s\n' 'error: cannot search repository share-search-missing: ERROR: unable to search: local repo with name share-search-missing not found' \
+	>"$tmp/share-search-repo.error"
+check "repo_set reports the exact missing repository error" cmp -s "$tmp/err" "$tmp/share-search-repo.error"
+search_runs snapshot_names share-search-missing
+check "snapshot_names exits 1 for a missing snapshot" test "$(cat "$tmp/status")" = 1
+check "snapshot_names prints nothing for a missing snapshot" test ! -s "$tmp/out"
+printf '%s\n' 'error: cannot search snapshot share-search-missing: ERROR: unable to search: snapshot with name share-search-missing not found' \
+	>"$tmp/share-search-snapshot.error"
+check "snapshot_names reports the exact missing snapshot error" cmp -s "$tmp/err" "$tmp/share-search-snapshot.error"
+
 # --- dry run ------------------------------------------------------------------
 
 # The committed configuration publishes both components (core ADR-0059);

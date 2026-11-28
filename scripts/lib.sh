@@ -583,26 +583,25 @@ one_component_rule() {
 	done
 }
 
-# repo_set REPO prints the repository's packages as sorted "name version
-# arch". An empty repository gives nothing; any other aptly error is fatal.
-repo_set() {
+# aptly_search_set KIND NAME FORMAT LABEL prints sorted unique results.
+# An aptly "no results" error gives nothing; other search failures are fatal.
+aptly_search_set() {
 	local out
-	if ! out=$(aptly_ repo search -format='{{.Package}} {{.Version}} {{.Architecture}}' "$1" 2>&1); then
-		[[ $out == *"no results"* ]] || die "cannot search repository $1: $out"
+	if ! out=$(aptly_ "$1" search -format="$3" "$2" 2>&1); then
+		[[ $out == *"no results"* ]] || die "cannot search $4 $2: $out"
 		return 0
 	fi
 	LC_ALL=C sort -u <<<"$out"
 }
 
-# snapshot_names SNAPSHOT prints the package names in SNAPSHOT, sorted and
-# unique. An empty snapshot gives nothing; any other aptly error is fatal.
+# repo_set REPO prints the repository's packages as sorted "name version arch".
+repo_set() {
+	aptly_search_set repo "$1" '{{.Package}} {{.Version}} {{.Architecture}}' repository
+}
+
+# snapshot_names SNAPSHOT prints the package names in SNAPSHOT, sorted and unique.
 snapshot_names() {
-	local out
-	if ! out=$(aptly_ snapshot search -format='{{.Package}}' "$1" 2>&1); then
-		[[ $out == *"no results"* ]] || die "cannot search snapshot $1: $out"
-		return 0
-	fi
-	LC_ALL=C sort -u <<<"$out"
+	aptly_search_set snapshot "$1" '{{.Package}}' snapshot
 }
 
 # published_snapshot CODENAME COMPONENT prints the snapshot aptly's database
